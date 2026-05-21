@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* §3 — Semantic design tokens. The ONLY place raw hex lives; components
+   reference these via Tailwind utilities (trust-*, edge-*) or var(--…). */
+:root {
+  /* trust / spine */
+  --color-contract: #3b82f6;
+  --color-verified: #16a34a;
+  --color-narrowed: #ca8a04;
+  --color-asserted: #dc2626;
+  --color-dark: #1f2937;
+  --color-untouched: #525252; /* contract with no touches — neutral, never green */
+  /* edges */
+  --color-edge-read: #93c5fd;
+  --color-edge-write: #f87171;
+  /* AI commentary accent (kept distinct from the grounded trust palette) */
+  --color-ai: #8b5cf6;
+  /* surfaces */
+  --color-bg-base: #0a0a0a;
+  --color-bg-surface: #171717;
+  --color-bg-node: rgba(23, 23, 23, 0.95);
+  --color-grid: #262626;
+  --color-border-subtle: #262626;
+  /* text */
+  --color-text-primary: #f5f5f5;
+  --color-text-secondary: #a3a3a3;
+  --color-text-muted: #525252;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--color-bg-base);
+  color: var(--color-text-primary);
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+/* §6 — hover dimming + §7 LOD transitions ride on the React Flow wrappers. */
+.react-flow__node,
+.react-flow__edge {
+  transition: opacity 200ms ease;
+}
+
+/* §7 — LOD: when the canvas wrapper carries `.lod` (zoom < 0.6), drop nested
+   node text to cut GPU text-rendering. The border + dot still convey trust. */
+.lod .lod-hideable {
+  display: none;
+}
