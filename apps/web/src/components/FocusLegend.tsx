@@ -1,9 +1,14 @@
 import type { Trust } from '@throughline/core';
-import { TRUST_COPY, TRUST_META, toneDotClass } from '../lib/trust';
-import { VERDICT_META, VERDICT_ORDER } from '../lib/columnUsage';
+import { SCHEMA_MATCH_COPY, SCHEMA_MATCH_META, TRUST_COPY, TRUST_META, toneDotClass } from '../lib/trust';
+import { REACH_META, REACH_ORDER, reachDot } from '../lib/columnUsage';
 
 // Ordered best -> worst so the scale reads "type-checked -> no checked type".
 const TRUST_ORDER: Trust[] = ['verified', 'narrowed', 'asserted', 'dark'];
+
+// Schema-match tiers (deep-parsed writes): the good-but-not-enforced verdict and
+// the alarming one. Listed alongside trust so the aligned-vs-verified honesty
+// distinction reads at a glance.
+const SCHEMA_MATCH_ORDER = ['aligned', 'mismatch'] as const;
 
 // Persistent (never dismissible) legend for the focus view. Teaches the two
 // distinct axes: contract is a KIND (drawn as its table shape), trust is a
@@ -37,6 +42,22 @@ export function FocusLegend() {
 
       <span className="mx-1 h-3.5 w-px bg-neutral-700" />
 
+      {/* Schema-match axis — deep-parsed writes. aligned is teal, NOT verified
+          green: matched now, but not compiler-enforced. */}
+      <span className="font-semibold uppercase tracking-wide text-neutral-600">
+        schema match = a scale (writes)
+      </span>
+      {SCHEMA_MATCH_ORDER.map((s) => (
+        <span key={s} className="flex items-center gap-1.5">
+          <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${toneDotClass(s)}`} />
+          <span className="text-neutral-200">{SCHEMA_MATCH_COPY[s].plain}</span>
+          <span className="text-neutral-500">{s}</span>
+          <span className="text-neutral-500">— {SCHEMA_MATCH_META[s].blurb}</span>
+        </span>
+      ))}
+
+      <span className="mx-1 h-3.5 w-px bg-neutral-700" />
+
       <span className="flex items-center gap-1.5">
         <span className="inline-block h-0.5 w-5" style={{ background: 'var(--color-edge-write)' }} />
         <span className="text-neutral-200">write</span> — data enters
@@ -46,19 +67,20 @@ export function FocusLegend() {
         <span className="text-neutral-200">read</span> — data exits
       </span>
 
-      {/* Column read-usage axis — how each column is read. Filled dot = the only
-          certain verdict; hollow = a heuristic (or untraceable) inference. */}
+      {/* Column read-REACH axis — where each column's value travels. Filled dot =
+          a certain read; hollow = a heuristic (or untraceable) inference. The
+          no-reader and untraceable states carry an honest hedge in their copy. */}
       <span className="mx-1 h-3.5 w-px bg-neutral-700" />
       <span className="font-semibold uppercase tracking-wide text-neutral-600">
-        column reads = a scale
+        column reach = where the value goes
       </span>
       <span className="text-neutral-600">(filled = certain · hollow = heuristic)</span>
-      {VERDICT_ORDER.map((v) => {
-        const meta = VERDICT_META[v];
+      {REACH_ORDER.map((r) => {
+        const meta = REACH_META[r];
         return (
-          <span key={v} className="flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={meta.dot} />
-            <span className="text-neutral-200">{meta.label}</span>
+          <span key={r} className="flex items-center gap-1.5">
+            <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={reachDot(r, true)} />
+            <span style={{ color: meta.color }}>{meta.label}</span>
             <span className="text-neutral-500">— {meta.blurb}</span>
           </span>
         );

@@ -12,6 +12,9 @@ export default {
           narrowed: 'var(--color-narrowed)',
           asserted: 'var(--color-asserted)',
           dark: 'var(--color-dark)',
+          // schema-match axis (deep-parsed writes) — see index.css.
+          aligned: 'var(--color-aligned)',
+          mismatch: 'var(--color-mismatch)',
         },
         edge: {
           read: 'var(--color-edge-read)',

@@ -8,6 +8,7 @@ import {
 } from 'ts-morph';
 import type { ColumnUsage, ColumnUsageVerdict, GraphNode, SourceRef } from '@throughline/core';
 import { loadProject } from './parseTs.js';
+import { computeReach, type ReachResult } from './reach.js';
 
 // ---------------------------------------------------------------------------
 // Column-level read-usage analysis (TypeScript only).
@@ -34,9 +35,11 @@ import { loadProject } from './parseTs.js';
 // guess. Cross-file tracing is a later upgrade.
 // ---------------------------------------------------------------------------
 
-const WRITE_METHODS = new Set(['insert', 'update', 'upsert', 'delete']);
-const EXCLUDE = /[/\\](node_modules|\.next|dist|out|build|\.turbo)[/\\]|\.d\.ts$/;
-const IDENT = /^[A-Za-z_$][\w$]*$/;
+// Shared with the reach tracer (reach.ts) so both passes agree on which files to
+// skip, what counts as a write, and what a valid identifier looks like.
+export const WRITE_METHODS = new Set(['insert', 'update', 'upsert', 'delete']);
+export const EXCLUDE = /[/\\](node_modules|\.next|dist|out|build|\.turbo)[/\\]|\.d\.ts$/;
+export const IDENT = /^[A-Za-z_$][\w$]*$/;
 const MAX_EVIDENCE = 5;
 
 type AccessKind = 'jsx' | 'code';
@@ -89,10 +92,15 @@ export function computeColumnUsage(
     }
   }
 
+  // The reach axis (B1): WHERE each column's value travels, traced cross-file via
+  // findReferences. Computed in a separate pass that shares this same Project.
+  const reachByTable = computeReach(repoPath, contracts, project);
+
   const out = new Map<string, ColumnUsage[]>();
   for (const [table, acc] of tables) {
+    const reachMap = reachByTable.get(table);
     const usages: ColumnUsage[] = [];
-    for (const col of acc.columns) usages.push(verdictFor(col, table, acc));
+    for (const col of acc.columns) usages.push(verdictFor(col, table, acc, reachMap?.get(col)));
     out.set(table, usages);
   }
   return out;
@@ -150,13 +158,24 @@ function analyzeRead(fromCall: CallExpression, acc: TableAcc, repoPath: string, 
 // Verdict combination (highest confidence wins).
 // ---------------------------------------------------------------------------
 
-function verdictFor(col: string, table: string, acc: TableAcc): ColumnUsage {
+function verdictFor(col: string, table: string, acc: TableAcc, reach?: ReachResult): ColumnUsage {
+  // The reach axis is computed independently; if the tracer never saw a read of
+  // this column it isn't in the map, which from reach's view means `never_read`.
+  const r: ReachResult = reach ?? { reach: 'never_read' };
   const make = (
     verdict: ColumnUsageVerdict,
     certain: boolean,
     evidence: SourceRef[],
     note: string,
-  ): ColumnUsage => ({ column: col, verdict, certain, evidence: evidence.slice(0, MAX_EVIDENCE), note });
+  ): ColumnUsage => ({
+    column: col,
+    verdict,
+    certain,
+    evidence: evidence.slice(0, MAX_EVIDENCE),
+    note,
+    reach: r.reach,
+    ...(r.escapeTrail && r.escapeTrail.length > 0 ? { escapeTrail: r.escapeTrail.slice(0, MAX_EVIDENCE) } : {}),
+  });
 
   // 1. EXPLICIT — fact.
   const explicit = acc.explicit.get(col);
@@ -236,20 +255,22 @@ function push(map: Map<string, SourceRef[]>, key: string, ref: SourceRef) {
 // Chain walking: direction + which columns (if any) the select names.
 // ---------------------------------------------------------------------------
 
-interface ChainInfo {
+export interface ChainInfo {
   isWrite: boolean;
   explicitColumns: string[] | null; // null === a `*`/empty/absent select
   selectCall: CallExpression | null; // the `.select(...)` call, for evidence
   outerCall: CallExpression; // outermost call in the fluent chain
   thenCallback: Node | null; // first arg of a trailing `.then(cb)`, if any
+  single: boolean; // a `.single()`/`.maybeSingle()` in the chain → result is one row, not an array
 }
 
-function walkChain(fromCall: CallExpression): ChainInfo {
+export function walkChain(fromCall: CallExpression): ChainInfo {
   const methods: string[] = [];
   let explicitColumns: string[] | null = null;
   let sawStar = false;
   let selectCall: CallExpression | null = null;
   let thenCallback: Node | null = null;
+  let single = false;
   let outerCall: CallExpression = fromCall;
 
   let current: Node = fromCall;
@@ -271,6 +292,8 @@ function walkChain(fromCall: CallExpression): ChainInfo {
       }
     } else if (method === 'then') {
       thenCallback = grandparent.getArguments()[0] ?? null;
+    } else if (method === 'single' || method === 'maybeSingle') {
+      single = true;
     }
     outerCall = grandparent;
     current = grandparent;
@@ -280,14 +303,14 @@ function walkChain(fromCall: CallExpression): ChainInfo {
   // A concrete select wins; `*`, an empty/dynamic select, or no select at all
   // all leave explicitColumns === null, which downstream treats as a star read.
   void sawStar;
-  return { isWrite, explicitColumns, selectCall, outerCall, thenCallback };
+  return { isWrite, explicitColumns, selectCall, outerCall, thenCallback, single };
 }
 
 // Parse a `.select(arg)` first argument into real column names.
 //   - returns '*' for `select()`, `select('*')`, or anything we treat as full.
 //   - handles `alias:col`, bare `col`, and `col::cast`.
 //   - skips embedded-relation syntax containing parentheses (v1).
-function parseSelectArg(arg: Node | undefined): string[] | '*' {
+export function parseSelectArg(arg: Node | undefined): string[] | '*' {
   if (!arg) return '*';
   const lit = literalString(arg);
   if (lit === undefined) return '*'; // dynamic select — treat as full read
@@ -455,7 +478,7 @@ function scanRowsVar(
   return { accesses, escaped, escapeRef };
 }
 
-function inJsx(node: Node): boolean {
+export function inJsx(node: Node): boolean {
   return (
     node.getFirstAncestorByKind(SyntaxKind.JsxExpression) !== undefined ||
     node.getFirstAncestorByKind(SyntaxKind.JsxElement) !== undefined ||
@@ -469,7 +492,7 @@ function inJsx(node: Node): boolean {
 // Shared AST helpers (kept local so parseTs stays untouched).
 // ---------------------------------------------------------------------------
 
-function findFromCalls(sf: SourceFile): CallExpression[] {
+export function findFromCalls(sf: SourceFile): CallExpression[] {
   const out: CallExpression[] = [];
   for (const call of sf.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const expr = call.getExpression();
@@ -478,7 +501,7 @@ function findFromCalls(sf: SourceFile): CallExpression[] {
   return out;
 }
 
-function resolveTableName(arg: Node | undefined): string | undefined {
+export function resolveTableName(arg: Node | undefined): string | undefined {
   const direct = literalString(unwrapParens(arg));
   if (direct !== undefined) return direct;
   const inner = arg ? unwrapParens(arg) : undefined;
@@ -486,13 +509,13 @@ function resolveTableName(arg: Node | undefined): string | undefined {
   return undefined;
 }
 
-function unwrapParens(node: Node | undefined): Node | undefined {
+export function unwrapParens(node: Node | undefined): Node | undefined {
   let current = node;
   while (current && Node.isParenthesizedExpression(current)) current = current.getExpression();
   return current;
 }
 
-function literalString(node: Node | undefined): string | undefined {
+export function literalString(node: Node | undefined): string | undefined {
   if (!node) return undefined;
   if (Node.isStringLiteral(node)) return node.getLiteralValue();
   if (Node.isNoSubstitutionTemplateLiteral(node)) return node.getLiteralText();
@@ -502,7 +525,7 @@ function literalString(node: Node | undefined): string | undefined {
 // Build a SourceRef from a node, grounding it in real code. Prefers the
 // enclosing statement for context, but falls back to the node when that would
 // produce an unwieldy snippet (e.g. a giant JSX return).
-function refFrom(node: Node, repoPath: string, sf: SourceFile): SourceRef {
+export function refFrom(node: Node, repoPath: string, sf: SourceFile): SourceRef {
   let target: Node = node;
   const stmt = enclosingStatement(node);
   if (stmt.getEndLineNumber() - stmt.getStartLineNumber() <= 6) target = stmt;

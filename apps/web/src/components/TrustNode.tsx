@@ -1,22 +1,23 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import type { NodeKind, Trust } from '@throughline/core';
-import { langTag, toneBorderClass, toneDotClass, toneOf, toneVar } from '../lib/trust';
+import type { NodeKind, SchemaMatch, Trust } from '@throughline/core';
+import { effectiveVerdict, langTag, toneBorderClass, toneDotClass, toneOf, toneVar } from '../lib/trust';
 
 export interface TrustNodeData extends Record<string, unknown> {
   label: string;
   kind: NodeKind;
   trust?: Trust;
+  schemaMatch?: SchemaMatch;
   language?: string;
   columnCount?: number;
   filePath?: string;
 }
 
-// §5A — fixed-width card; trust communicated via border + dot (no loud fills).
+// §5A — fixed-width card; verdict communicated via border + dot (no loud fills).
 // Header text and metadata are `lod-hideable` so they drop out when zoomed out.
 function TrustNodeBase({ data, selected }: NodeProps) {
   const d = data as TrustNodeData;
-  const tone = toneOf(d.kind, d.trust);
+  const tone = toneOf(d.kind, effectiveVerdict(d));
   const color = toneVar(tone);
   const rightMeta =
     d.kind === 'contract' ? `sql · ${d.columnCount ?? 0} cols` : langTag(d.language);

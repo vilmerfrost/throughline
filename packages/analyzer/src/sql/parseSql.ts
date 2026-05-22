@@ -199,10 +199,14 @@ function collectPrimaryKeyColumns(stmt: CreateTableStatement): Set<string> {
 function buildColumn(def: CreateColumnDef, pkColumns: Set<string>): ContractColumn {
   const name = def.name.name;
   let notNull = pkColumns.has(name);
+  let hasDefault = false;
   for (const c of def.constraints ?? []) {
     if (c.type === 'not null' || c.type === 'primary key') notNull = true;
+    // A DEFAULT (incl. on a PK, e.g. `default gen_random_uuid()`) makes the
+    // column OPTIONAL on insert — Postgres fills it — even when NOT NULL.
+    if (c.type === 'default') hasDefault = true;
   }
-  return { name, type: renderType(def.dataType), nullable: !notNull };
+  return { name, type: renderType(def.dataType), nullable: !notNull, hasDefault };
 }
 
 function toContractNode(t: TableAcc): GraphNode {

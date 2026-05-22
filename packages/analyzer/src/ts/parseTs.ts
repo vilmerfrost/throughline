@@ -11,10 +11,18 @@ import type {
   EdgeDirection,
   GraphEdge,
   GraphNode,
+  RootCause,
   SourceRef,
   Trust,
   TrustReason,
 } from '@throughline/core';
+import {
+  classifyUnresolved,
+  resolveClientOrigin,
+  rollupRootCauses,
+  UNRESOLVED_ORIGIN,
+  type RootCauseInput,
+} from './rootCause.js';
 
 const WRITE_METHODS = new Set(['insert', 'update', 'upsert', 'delete']);
 const ANY_LIKE = /^(any|unknown|never)$/;
@@ -24,6 +32,9 @@ const EXCLUDE = /[/\\](node_modules|\.next|dist|out|build|\.turbo)[/\\]|\.d\.ts$
 export interface ParseTsResult {
   nodes: GraphNode[];
   edges: GraphEdge[];
+  // RC-a (additive): deterministic root-cause rollup of the dark/asserted TS
+  // touches found in this pass, ranked biggest-lever-first.
+  rootCauses: RootCause[];
 }
 
 // Detect where TypeScript reads or writes a database contract, and assign each
@@ -44,6 +55,8 @@ export async function parseTs(
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const usedIds = new Set<string>();
+  // RC-a: per-touch facts for dark/asserted touches, rolled up at the end.
+  const rootCauseInputs: RootCauseInput[] = [];
 
   // diagnostics (env-gated debug only)
   let filesScanned = 0;
@@ -94,6 +107,26 @@ export async function parseTs(
           target: `contract:${table.name}`,
           direction: touch.direction,
         });
+
+        // RC-a: only dark/asserted touches have a root cause worth flipping.
+        // The origin is resolved deterministically; loose resolution → unresolved,
+        // and an unresolved origin is classified by shape (why it's unresolved).
+        if (touch.trust === 'dark' || touch.trust === 'asserted') {
+          const origin = resolveClientOrigin(fromCall, repoPath);
+          let evidence: SourceRef | undefined;
+          if (origin.name === UNRESOLVED_ORIGIN) {
+            const classified = classifyUnresolved(fromCall, repoPath);
+            origin.shape = classified.shape;
+            evidence = classified.evidence;
+          }
+          rootCauseInputs.push({
+            touchId: id,
+            reason: touch.trustReason,
+            contract: table.name,
+            origin,
+            evidence,
+          });
+        }
       }
     } catch (err) {
       filesSkipped += 1;
@@ -131,7 +164,7 @@ export async function parseTs(
     );
   }
 
-  return { nodes, edges };
+  return { nodes, edges, rootCauses: rollupRootCauses(rootCauseInputs) };
 }
 
 // ---------------------------------------------------------------------------

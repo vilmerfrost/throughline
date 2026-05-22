@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -7,6 +8,7 @@ import { parseSql } from './sql/parseSql.js';
 import { loadProject, parseTs } from './ts/parseTs.js';
 import { computeColumnUsage } from './ts/columnUsage.js';
 import { grepShallow } from './shallow/grep.js';
+import { analyzeRustWrites, attachSchemaMatch } from './rust/schemaMatch.js';
 import { detectDrift } from './drift/detect.js';
 import { explainHandler, type ExplainContext } from './explain.js';
 import { buildFixPrompt, polishFixPromptWithLLM } from './fixPrompt.js';
@@ -46,13 +48,25 @@ async function buildGraph(repoPath: string): Promise<Graph> {
     const usage = columnUsage.get(node.label);
     if (usage) node.columnUsage = usage;
   }
+
+  // Stage 1a (ADDITIVE): deep-parse Rust writes and stamp a struct-vs-schema
+  // `schemaMatch` verdict onto the (still-dark) Rust write touches, plus emit
+  // grounded column-level drift findings. `trust` is deliberately left as-is.
+  const rustWrites = await analyzeRustWrites(repoPath, sqlNodes);
+  attachSchemaMatch(shallowResult.nodes, rustWrites);
+  const rustDrift = rustWrites.flatMap((w) => w.drift);
+
   const nodes = [...sqlNodes, ...touches];
 
   return {
     repoPath,
     nodes,
     edges,
-    drift: detectDrift(sqlNodes, touches, edges),
+    drift: [...detectDrift(sqlNodes, touches, edges), ...rustDrift],
+    // RC-a (additive): deterministic root-cause rollup of the dark/asserted TS
+    // touches, ranked biggest-lever-first. Computed by the TS analyzer; nothing
+    // else touched.
+    rootCauses: tsResult.rootCauses,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -85,9 +99,31 @@ app.post('/fix-prompt', async (req, res) => {
   res.json(polished);
 });
 
+function resolveRepoPath(repoPath: string): string {
+  if (!repoPath || repoPath === '<mock-repo>') {
+    return '/Users/vilmerfrost/Projects/Batch-Guard.ai-2';
+  }
+
+  // Normalize spelling typos (e.g. batchgaurd -> Batch-Guard), missing hyphens, and different casings
+  const lower = repoPath.toLowerCase();
+  if (
+    lower.includes('batchgaurd') || 
+    lower.includes('batchguard') || 
+    lower.includes('batch-guard')
+  ) {
+    const targetPath = '/Users/vilmerfrost/Projects/Batch-Guard.ai-2';
+    if (fs.existsSync(targetPath)) {
+      return targetPath;
+    }
+  }
+
+  return repoPath;
+}
+
 // GET /analyze?path=/some/repo  ->  Graph JSON
 app.get('/analyze', async (req, res) => {
-  const repoPath = typeof req.query.path === 'string' ? req.query.path : '<mock-repo>';
+  const rawPath = typeof req.query.path === 'string' ? req.query.path : '<mock-repo>';
+  const repoPath = resolveRepoPath(rawPath);
   res.json(await buildGraph(repoPath));
 });
 

@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ReactFlowProvider } from '@xyflow/react';
-import type { EdgeDirection, Graph, GraphNode, Language, Trust } from '@throughline/core';
+import type { ColumnReach, EdgeDirection, Graph, GraphNode, Language, Trust } from '@throughline/core';
 import { fetchGraph } from './lib/api';
 import { applyFilters, defaultFilterState, toggle } from './lib/filters';
 import { buildContractSummaries, buildFocusModel, type FocusAggregate } from './lib/focus';
-import { langTag } from './lib/trust';
+import { contractPasses, emptyFocusFilter, type FocusFilterState } from './lib/focusFilter';
+import { langTag, type Verdict } from './lib/trust';
 import { GraphCanvas } from './components/GraphCanvas';
 import { FilterBar } from './components/FilterBar';
 import { Inspector, type AggregateSelection } from './components/Inspector';
 import { ContractPicker } from './components/ContractPicker';
+import { FocusFilterBar } from './components/FocusFilterBar';
 import { FocusCanvas } from './components/FocusCanvas';
 import { FocusLegend } from './components/FocusLegend';
+import { RootCausesView } from './components/RootCausesView';
 
-type View = 'focus' | 'map';
+type View = 'focus' | 'roots' | 'map';
 
 export function App() {
   const [graph, setGraph] = useState<Graph | null>(null);
@@ -27,6 +30,10 @@ export function App() {
 
   // Map-view filters (unchanged).
   const [filters, setFilters] = useState(defaultFilterState);
+
+  // Focus-view triage filter — verdict (touches/contract dot) + reach (columns).
+  // Persisted across contract selection (deliberately not reset on select).
+  const [focusFilter, setFocusFilter] = useState<FocusFilterState>(emptyFocusFilter);
 
   const loadGraph = useCallback(async () => {
     setRefreshing(true);
@@ -57,6 +64,45 @@ export function App() {
     () => (graph && focusContractId ? buildFocusModel(graph, focusContractId) : null),
     [graph, focusContractId],
   );
+
+  // Contract list, narrowed by the triage filter (OR across selected chips).
+  const filteredSummaries = useMemo(
+    () => summaries.filter((s) => contractPasses(s, focusFilter)),
+    [summaries, focusFilter],
+  );
+
+  // Within-contract: verdict chips filter the rendered touch aggregates. The
+  // full focusModel is kept (for aggregate selection); only the canvas view is
+  // narrowed. No verdict chips active = show every touch.
+  const displayModel = useMemo(() => {
+    if (!focusModel || focusFilter.verdicts.size === 0) return focusModel;
+    const keep = (a: FocusAggregate) => focusFilter.verdicts.has(a.verdict);
+    return {
+      ...focusModel,
+      writers: focusModel.writers.filter(keep),
+      readers: focusModel.readers.filter(keep),
+    };
+  }, [focusModel, focusFilter.verdicts]);
+
+  // Toggling a chip clears any root-cause contract scope (they're separate lenses).
+  const toggleVerdict = (v: Verdict) =>
+    setFocusFilter((f) => ({ ...f, contracts: new Set(), verdicts: toggle(f.verdicts, v) }));
+  const toggleReach = (r: ColumnReach) =>
+    setFocusFilter((f) => ({ ...f, contracts: new Set(), reaches: toggle(f.reaches, r) }));
+  const clearFocusFilter = () => setFocusFilter(emptyFocusFilter());
+
+  // From the Root Causes view: scope the contract list to a root cause's affected
+  // contracts and jump to focus so the user can triage them. Reuses the filter.
+  const showAffectedContracts = (contracts: string[]) => {
+    setFocusFilter({ verdicts: new Set(), reaches: new Set(), contracts: new Set(contracts) });
+    const first = summaries.find((s) => contracts.includes(s.label));
+    if (first) {
+      setFocusContractId(first.id);
+      setSelectedId(first.id);
+      setSelectedAggKey(null);
+    }
+    setView('focus');
+  };
 
   // Default-select the worst contract (top of the sorted picker) once loaded.
   useEffect(() => {
@@ -96,7 +142,7 @@ export function App() {
     const touches = agg.touchIds
       .map((id) => byId.get(id))
       .filter((n): n is GraphNode => Boolean(n));
-    return { title: `${langTag(agg.language)} ${agg.direction} · ${agg.trust}`, touches };
+    return { title: `${langTag(agg.language)} ${agg.direction} · ${agg.verdict}`, touches };
   }, [view, selectedAggKey, focusModel, graph]);
 
   const selectContract = (id: string) => {
@@ -144,6 +190,15 @@ export function App() {
             </button>
             <button
               type="button"
+              onClick={() => setView('roots')}
+              className={`rounded px-3 py-1 font-medium transition ${
+                view === 'roots' ? 'bg-neutral-800 text-neutral-100' : 'text-neutral-500 hover:text-neutral-300'
+              }`}
+            >
+              Root Causes
+            </button>
+            <button
+              type="button"
               onClick={() => setView('map')}
               className={`rounded px-3 py-1 font-medium transition ${
                 view === 'map' ? 'bg-neutral-800 text-neutral-100' : 'text-neutral-500 hover:text-neutral-300'
@@ -177,13 +232,23 @@ export function App() {
 
       {view === 'focus' ? (
         <main className="flex min-h-0 flex-1">
-          {/* LEFT — contract picker */}
-          <aside className="w-72 shrink-0 border-r border-neutral-800 bg-neutral-950">
-            <ContractPicker
-              summaries={summaries}
-              selectedId={focusContractId}
-              onSelect={selectContract}
+          {/* LEFT — triage filter + contract picker */}
+          <aside className="flex w-72 shrink-0 flex-col border-r border-neutral-800 bg-neutral-950">
+            <FocusFilterBar
+              filter={focusFilter}
+              shown={filteredSummaries.length}
+              total={summaries.length}
+              onToggleVerdict={toggleVerdict}
+              onToggleReach={toggleReach}
+              onClear={clearFocusFilter}
             />
+            <div className="min-h-0 flex-1">
+              <ContractPicker
+                summaries={filteredSummaries}
+                selectedId={focusContractId}
+                onSelect={selectContract}
+              />
+            </div>
           </aside>
 
           {/* CENTER — the focus flow + persistent legend */}
@@ -194,10 +259,10 @@ export function App() {
               <div className="px-4 py-2 text-right">Readers — data exits</div>
             </div>
             <div className="min-h-0 flex-1">
-              {focusModel ? (
-                <ReactFlowProvider key={focusModel.contract.id}>
+              {displayModel ? (
+                <ReactFlowProvider key={displayModel.contract.id}>
                   <FocusCanvas
-                    model={focusModel}
+                    model={displayModel}
                     live={live}
                     selectedId={selectedId}
                     selectedAggKey={selectedAggKey}
@@ -222,9 +287,18 @@ export function App() {
               graph={graph}
               drift={graph?.drift ?? []}
               aggregate={inspectorAggregate}
+              reachFilter={focusFilter.reaches}
             />
           </aside>
         </main>
+      ) : view === 'roots' ? (
+        graph ? (
+          <RootCausesView graph={graph} onShowAffected={showAffectedContracts} />
+        ) : (
+          <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-neutral-500">
+            Loading graph…
+          </div>
+        )
       ) : (
         <>
           {graph ? (

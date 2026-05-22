@@ -11,9 +11,8 @@ import {
   type Node,
   type NodeMouseHandler,
 } from '@xyflow/react';
-import type { Trust } from '@throughline/core';
 import type { FocusAggregate, FocusModel } from '../lib/focus';
-import { TRUST_COPY, edgeLabel, toneVar } from '../lib/trust';
+import { edgeLabel, toneVar, verdictCopy, type Verdict } from '../lib/trust';
 import { AggregateNode } from './AggregateNode';
 import { ContractSpineNode } from './ContractSpineNode';
 
@@ -51,14 +50,14 @@ interface FocusCanvasProps {
   onClear: () => void;
 }
 
-type Tip = { trust: Trust; x: number; y: number };
+type Tip = { verdict: Verdict; x: number; y: number };
 
-// Hover tooltip — meaning + what-breaks for a trust state. Fixed-positioned at
-// the cursor, pointer-events-none (never blocks node clicks), and flips near
-// the viewport edges so it can't get clipped.
-function TrustTooltip({ trust, x, y }: Tip) {
-  const copy = TRUST_COPY[trust];
-  const color = toneVar(trust);
+// Hover tooltip — meaning + what-breaks for a verdict. Fixed-positioned at the
+// cursor, pointer-events-none (never blocks node clicks), and flips near the
+// viewport edges so it can't get clipped.
+function TrustTooltip({ verdict, x, y }: Tip) {
+  const copy = verdictCopy(verdict);
+  const color = toneVar(verdict);
   const W = 288;
   const H = 132;
   const left = x + 16 + W > window.innerWidth ? x - W - 16 : x + 16;
@@ -72,7 +71,7 @@ function TrustTooltip({ trust, x, y }: Tip) {
         <span className="font-semibold" style={{ color }}>
           {copy.plain}
         </span>
-        <span className="text-[11px] text-neutral-500">{trust}</span>
+        <span className="text-[11px] text-neutral-500">{verdict}</span>
       </div>
       <p className="leading-relaxed text-neutral-200">{copy.meaning}</p>
       <p className="mt-1.5 leading-relaxed text-neutral-400">{copy.risk}</p>
@@ -104,7 +103,7 @@ export function FocusCanvas({
         id: `agg:${w.key}`,
         type: 'aggregate',
         position: { x: LANE_A_X, y: writersOffset + i * LANE_GAP },
-        data: { language: w.language, direction: w.direction, trust: w.trust, count: w.count },
+        data: { language: w.language, direction: w.direction, verdict: w.verdict, count: w.count },
       });
     });
 
@@ -116,8 +115,8 @@ export function FocusCanvas({
       data: {
         label: contract.label,
         columnCount: contract.columns?.length ?? 0,
-        deadCount: usage.filter((u) => u.verdict === 'likely_dead').length,
-        unknownCount: usage.filter((u) => u.verdict === 'unknown').length,
+        neverReadCount: usage.filter((u) => u.reach === 'never_read').length,
+        serverOnlyCount: usage.filter((u) => u.reach === 'server_only').length,
         writtenNothingReads: model.flags.writtenNothingReads,
         readNothingWrites: model.flags.readNothingWrites,
       },
@@ -128,7 +127,7 @@ export function FocusCanvas({
         id: `agg:${r.key}`,
         type: 'aggregate',
         position: { x: LANE_C_X, y: readersOffset + i * LANE_GAP },
-        data: { language: r.language, direction: r.direction, trust: r.trust, count: r.count },
+        data: { language: r.language, direction: r.direction, verdict: r.verdict, count: r.count },
       });
     });
 
@@ -145,10 +144,10 @@ export function FocusCanvas({
         target: contract.id,
         sourceHandle: 'sr',
         targetHandle: 'tl',
-        data: { trust: w.trust },
+        data: { verdict: w.verdict },
         style: { stroke: writeColor, strokeWidth: 1.5 },
         markerEnd: { type: MarkerType.ArrowClosed, color: writeColor },
-        label: edgeLabel(w.direction, w.trust),
+        label: edgeLabel(w.direction, w.verdict),
         labelStyle: labelStyle(writeColor),
         labelBgStyle: LABEL_BG_STYLE,
         labelBgPadding: [6, 3],
@@ -163,10 +162,10 @@ export function FocusCanvas({
         target: `agg:${r.key}`,
         sourceHandle: 'sr',
         targetHandle: 'tl',
-        data: { trust: r.trust },
+        data: { verdict: r.verdict },
         style: { stroke: readColor, strokeWidth: 1.5 },
         markerEnd: { type: MarkerType.ArrowClosed, color: readColor },
-        label: edgeLabel(r.direction, r.trust),
+        label: edgeLabel(r.direction, r.verdict),
         labelStyle: labelStyle(readColor),
         labelBgStyle: LABEL_BG_STYLE,
         labelBgPadding: [6, 3],
@@ -218,16 +217,16 @@ export function FocusCanvas({
 
   // --- Hover tooltips (touch nodes + edges) ---
   const [tip, setTip] = useState<Tip | null>(null);
-  const trustOf = (data: unknown): Trust | undefined =>
-    (data as { trust?: Trust } | undefined)?.trust;
+  const verdictOf = (data: unknown): Verdict | undefined =>
+    (data as { verdict?: Verdict } | undefined)?.verdict;
 
   const showNodeTip: NodeMouseHandler = (e, node) => {
-    const trust = trustOf(node.data);
-    if (node.type === 'aggregate' && trust) setTip({ trust, x: e.clientX, y: e.clientY });
+    const verdict = verdictOf(node.data);
+    if (node.type === 'aggregate' && verdict) setTip({ verdict, x: e.clientX, y: e.clientY });
   };
   const showEdgeTip: EdgeMouseHandler = (e, edge) => {
-    const trust = trustOf(edge.data);
-    if (trust) setTip({ trust, x: e.clientX, y: e.clientY });
+    const verdict = verdictOf(edge.data);
+    if (verdict) setTip({ verdict, x: e.clientX, y: e.clientY });
   };
   const clearTip = () => setTip(null);
 

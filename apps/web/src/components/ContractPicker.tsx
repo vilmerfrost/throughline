@@ -57,8 +57,8 @@ export function ContractPicker({ summaries, selectedId, onSelect }: ContractPick
                   >
                     <span
                       className="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full"
-                      style={{ background: worstTrustVar(s.trust) }}
-                      title={s.trust ?? 'untouched'}
+                      style={{ background: worstTrustVar(s.verdict) }}
+                      title={s.verdict ?? 'untouched'}
                     />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate font-mono text-sm text-neutral-200">

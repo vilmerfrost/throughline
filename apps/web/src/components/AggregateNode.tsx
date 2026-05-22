@@ -1,25 +1,25 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import type { EdgeDirection, Language, Trust } from '@throughline/core';
-import { TRUST_COPY, langTag, toneBorderClass, toneDotClass, toneVar } from '../lib/trust';
+import type { EdgeDirection, Language } from '@throughline/core';
+import { langTag, toneBorderClass, toneDotClass, toneVar, verdictCopy, type Verdict } from '../lib/trust';
 
-// One lane node = all touches sharing (language x trust x direction), e.g.
-// "RUST write ×4" colored dark. Mirrors TrustNode's card styling (§5A): fixed
-// width, border + dot carry the trust color, no loud fills.
+// One lane node = all touches sharing (language x verdict x direction), e.g.
+// "RUST write ×3" colored teal (aligned). Mirrors TrustNode's card styling (§5A):
+// fixed width, border + dot carry the verdict color, no loud fills.
 export interface AggregateNodeData extends Record<string, unknown> {
   language: Language;
   direction: EdgeDirection;
-  trust: Trust;
+  verdict: Verdict;
   count: number;
 }
 
 function AggregateNodeBase({ data, selected }: NodeProps) {
   const d = data as AggregateNodeData;
-  const color = toneVar(d.trust);
+  const color = toneVar(d.verdict);
 
   return (
     <div
-      className={`w-[220px] rounded-md border ${toneBorderClass(d.trust)} bg-node px-3 py-2 text-left backdrop-blur-sm`}
+      className={`w-[220px] rounded-md border ${toneBorderClass(d.verdict)} bg-node px-3 py-2 text-left backdrop-blur-sm`}
       style={selected ? { boxShadow: `0 0 0 2px ${color}` } : undefined}
     >
       {/* Writers expose a source on the right (into the spine); readers a target
@@ -29,7 +29,7 @@ function AggregateNodeBase({ data, selected }: NodeProps) {
 
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${toneDotClass(d.trust)}`} />
+          <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${toneDotClass(d.verdict)}`} />
           <span className="lod-hideable text-[11px] font-medium uppercase tracking-wide text-neutral-400">
             {langTag(d.language)} {d.direction}
           </span>
@@ -40,8 +40,8 @@ function AggregateNodeBase({ data, selected }: NodeProps) {
       </div>
 
       {/* Primary: plain phrase. Secondary: the original jargon word, muted. */}
-      <div className="mt-1 truncate font-mono text-sm text-neutral-100">{TRUST_COPY[d.trust].plain}</div>
-      <div className="lod-hideable mt-0.5 text-[11px] text-neutral-500">{d.trust}</div>
+      <div className="mt-1 truncate font-mono text-sm text-neutral-100">{verdictCopy(d.verdict).plain}</div>
+      <div className="lod-hideable mt-0.5 text-[11px] text-neutral-500">{d.verdict}</div>
     </div>
   );
 }

@@ -1,12 +1,13 @@
 import type { GraphNode } from '@throughline/core';
-import { langTag, toneOf, toneVar } from '../lib/trust';
+import { effectiveVerdict, langTag, toneOf, toneVar } from '../lib/trust';
 import { SourceLink } from './SourceLink';
 
 // One individual touch inside an aggregate's drill-down. Shows the grounded
 // facts (label, file:line, snippet) and reuses the working /explain endpoint —
 // each card owns its own explain state so they expand independently.
 export function TouchExplainCard({ node }: { node: GraphNode }) {
-  const color = toneVar(toneOf(node.kind, node.trust));
+  const verdict = effectiveVerdict(node);
+  const color = toneVar(toneOf(node.kind, verdict));
 
   return (
     <li className="rounded-md border border-neutral-800 p-3">
@@ -17,8 +18,8 @@ export function TouchExplainCard({ node }: { node: GraphNode }) {
             {langTag(node.language)}
           </span>
         ) : null}
-        {node.trust ? (
-          <span className="text-[11px] uppercase tracking-wide text-neutral-400">{node.trust}</span>
+        {verdict ? (
+          <span className="text-[11px] uppercase tracking-wide text-neutral-400">{verdict}</span>
         ) : null}
       </div>
 

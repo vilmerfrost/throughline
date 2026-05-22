@@ -23,6 +23,7 @@ export const sampleGraph: Graph = {
           column: 'id',
           verdict: 'used',
           certain: true,
+          reach: 'server_only',
           note: 'selected by name in 2 read(s) — certain.',
           evidence: [
             {
@@ -38,6 +39,7 @@ export const sampleGraph: Graph = {
           column: 'status',
           verdict: 'likely_rendered',
           certain: false,
+          reach: 'ui_shown',
           note: "accessed inside JSX in 1 place(s) via `select('*')` (heuristic: local-scope property access).",
           evidence: [
             {
@@ -53,6 +55,7 @@ export const sampleGraph: Graph = {
           column: 'spice_density',
           verdict: 'likely_dead',
           certain: false,
+          reach: 'never_read',
           note: "read via `select('*')` in 1 place(s) but this column is never accessed in local scope (heuristic).",
           evidence: [],
         },
@@ -60,6 +63,7 @@ export const sampleGraph: Graph = {
           column: 'created_by',
           verdict: 'unknown',
           certain: false,
+          reach: 'unknown',
           note: "read via `select('*')` whose result escaped local scope in 1 read(s) — cannot trace (heuristic).",
           evidence: [
             {
@@ -71,6 +75,23 @@ export const sampleGraph: Graph = {
                 "const { data } = await supabase.from('batches').select('*')",
                 'setBatches(data as Batch[])',
               ].join('\n'),
+            },
+          ],
+          // The reference chain up to where the type/trace was lost — followable by hand.
+          escapeTrail: [
+            {
+              language: 'typescript',
+              filePath: 'apps/admin/src/components/BatchList.tsx',
+              startLine: 31,
+              endLine: 31,
+              snippet: "const { data } = await supabase.from('batches').select('*')",
+            },
+            {
+              language: 'typescript',
+              filePath: 'apps/admin/src/components/BatchList.tsx',
+              startLine: 34,
+              endLine: 34,
+              snippet: 'setBatches(data as Batch[]) // escapes into untyped React state',
             },
           ],
         },
@@ -158,6 +179,50 @@ export const sampleGraph: Graph = {
         endLine: 93,
         snippet: 'sqlx::query("insert into batches (id, status) values ($1, $2)")',
       },
+    },
+  ],
+  // RC-b: offline demo of the root-cause rollup. One resolved construction-site
+  // lever and one parameter-shape group (with a real signature fix-site), so the
+  // Root Causes view renders honestly without the analyzer running.
+  rootCauses: [
+    {
+      reason: 'ts-loose-client',
+      origin: {
+        name: 'createAdminClient',
+        source: {
+          language: 'typescript',
+          filePath: 'apps/admin/src/lib/supabase.ts',
+          startLine: 8,
+          endLine: 8,
+          snippet: 'export const admin = createAdminClient(url, serviceKey)',
+        },
+      },
+      affectedCount: 1,
+      affectedTouchIds: ['touch:ts:batchData'],
+      affectedContracts: ['batches'],
+    },
+    {
+      reason: 'ts-cast-concrete',
+      origin: { name: 'unresolved-origin', shape: 'parameter' },
+      affectedCount: 1,
+      affectedTouchIds: ['touch:ts:batchData'],
+      affectedContracts: ['batches'],
+      evidence: [
+        {
+          language: 'typescript',
+          filePath: 'apps/admin/src/lib/batches.ts',
+          startLine: 30,
+          endLine: 30,
+          snippet: 'export async function loadBatch(admin: SupabaseClient, id: string)',
+        },
+      ],
+    },
+    {
+      reason: 'ts-loose-client',
+      origin: { name: 'unresolved-origin', shape: 'other' },
+      affectedCount: 1,
+      affectedTouchIds: ['touch:ts:batchData'],
+      affectedContracts: ['batches'],
     },
   ],
   generatedAt: '2026-05-21T12:00:00.000Z',

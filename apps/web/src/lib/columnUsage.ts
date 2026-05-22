@@ -1,132 +1,119 @@
 import type { CSSProperties } from 'react';
-import type { ColumnUsage, ColumnUsageVerdict } from '@throughline/core';
+import type { ColumnReach, ColumnUsage } from '@throughline/core';
 
-// Plain-language copy + visual language for the five column-usage verdicts.
-// Mirrors trust.ts in spirit: copy is authored verbatim, colors reference the
-// shared CSS-var tokens (never raw hex), and the certain-vs-heuristic split is
-// encoded VISUALLY (solid dot = certain fact, hollow dot = heuristic / unknown)
-// so a column can never be misread as proven when it isn't.
+// Plain-language copy + visual language for the column READ-REACH axis (B2).
+// Reach is the ONE per-column status — where the column's value actually
+// travels — and it supersedes the older usage verdict. Confidence stays encoded
+// VISUALLY in the same grammar as trust: a SOLID dot = a certain fact, a HOLLOW
+// (ring) dot = a heuristic, so a column can never be misread as proven when it
+// isn't. Colors reference the shared CSS-var tokens, never raw hex.
 //
-// label   — the short status word shown on the column row.
-// suffix  — the qualifier ALWAYS shown after the label. Every non-`used`
-//           verdict says how it was reached; the heuristics literally say
-//           "heuristic" so they never read as fact.
-// blurb   — the one-line legend explanation.
-export interface VerdictMeta {
-  label: string;
-  suffix: string;
-  certain: boolean;
-  highlight: boolean; // floats to the top + gets a tinted row (attention signal)
-  dot: CSSProperties; // solid (certain) vs ring (heuristic/unknown)
-  accentVar: string; // chip text / highlight color, as a CSS var or token
-  blurb: string;
+// Honesty is load-bearing in the copy:
+//   - never_read says "no reader found" and ALWAYS carries the unscanned-language
+//     hedge — it is never "dead" or "deletable".
+//   - unknown says "can't trace" and is framed as a blind spot to resolve (type
+//     the client), never as "not shown".
+
+const GREEN = 'var(--color-verified)'; // shown to a user
+const BLUE = 'var(--color-edge-read)'; // read, but server-side (echoes the read-edge color)
+const AMBER = 'var(--color-narrowed)'; // attention: no reader found (hedged, not alarming)
+const GRAY = '#737373'; // neutral-500 — a visible "blind spot" ring on the dark bg
+
+export interface ReachMeta {
+  label: string; // the status phrase shown on the column row
+  hedge?: string; // honesty caveat for never_read / unknown (shown in the expansion + legend)
+  color: string; // dot + chip color, as a CSS var or token
+  highlight: boolean; // floats up + gets a faint row tint (the stored-but-not-shown signal)
+  blurb: string; // one-line legend explanation
 }
 
-const GREEN = 'var(--color-verified)';
-const AMBER = 'var(--color-narrowed)';
-const GRAY = '#737373'; // neutral-500 — a visible "blind spot" ring on dark bg
-
-const solid = (color: string): CSSProperties => ({ background: color });
-const ring = (color: string): CSSProperties => ({
-  background: 'transparent',
-  border: `1.5px solid ${color}`,
-});
-
-export const VERDICT_META: Record<ColumnUsageVerdict, VerdictMeta> = {
-  used: {
-    label: 'read',
-    suffix: 'certain',
-    certain: true,
+export const REACH_META: Record<ColumnReach, ReachMeta> = {
+  ui_shown: {
+    label: 'shown in UI',
+    color: GREEN,
     highlight: false,
-    dot: solid(GREEN),
-    accentVar: GREEN,
-    blurb: 'explicitly selected by name — proven fact.',
+    blurb: 'a read resolves to a property access inside JSX — rendered to a user.',
   },
-  likely_used: {
-    label: 'likely read',
-    suffix: 'heuristic',
-    certain: false,
-    highlight: false,
-    dot: ring(GREEN),
-    accentVar: 'var(--color-text-secondary)',
-    blurb: "select('*') result accessed in code — inferred, not proven.",
-  },
-  likely_rendered: {
-    label: 'likely rendered',
-    suffix: 'heuristic',
-    certain: false,
-    highlight: false,
-    dot: ring(GREEN),
-    accentVar: 'var(--color-text-secondary)',
-    blurb: "select('*') result accessed inside JSX — inferred, not proven.",
-  },
-  likely_dead: {
-    label: 'no reads found',
-    suffix: 'heuristic',
-    certain: false,
+  server_only: {
+    label: 'used server-side · not shown',
+    color: BLUE,
     highlight: true,
-    dot: solid(AMBER),
-    accentVar: AMBER,
-    blurb: 'read locally but never accessed — the data may go nowhere.',
+    blurb: 'read in code but never inside JSX — used, just not rendered.',
+  },
+  never_read: {
+    label: 'no reader found',
+    color: AMBER,
+    highlight: true,
+    hedge: "no TS reader; Python/Rust/views aren't column-scanned, so this may still be read.",
+    blurb: 'no TypeScript reader found — may still be read elsewhere (not “dead”).',
   },
   unknown: {
-    label: 'usage unknown',
-    suffix: "via select('*'), escapes scope",
-    certain: false,
-    highlight: true,
-    dot: ring(GRAY),
-    accentVar: 'var(--color-text-secondary)',
-    blurb: "select('*') result left local scope — cannot be traced here.",
+    label: 'can’t trace · escapes scope',
+    color: GRAY,
+    highlight: false,
+    hedge: 'the value escapes into untyped scope — type the client to resolve.',
+    blurb: 'a read exists but the value escapes into untyped scope — can’t tell where it goes; type the client to resolve.',
   },
 };
 
-// Legend / list order: best-known fact first, then heuristics, with the two
-// attention verdicts (no-reads, unknown) last so the scale reads like the trust
-// one. (List SORTING floats those two to the top — see verdictRank.)
-export const VERDICT_ORDER: ColumnUsageVerdict[] = [
-  'used',
-  'likely_used',
-  'likely_rendered',
-  'likely_dead',
-  'unknown',
-];
+// Legend order: shown first (the resolved/good state), then the two stored-but-
+// not-shown states, then the blind spot.
+export const REACH_ORDER: ColumnReach[] = ['ui_shown', 'server_only', 'never_read', 'unknown'];
 
-// Float the "needs attention" verdicts (no-reads-found, unverifiable) to the top
-// so dead/unknown data is visible at a glance; everything else keeps schema order.
-export function verdictRank(verdict: ColumnUsageVerdict): number {
-  if (verdict === 'likely_dead') return 0;
-  if (verdict === 'unknown') return 1;
-  return 2;
+// A column with no reach data (old payloads / pre-B1) is honestly a blind spot.
+export function reachOf(u: ColumnUsage | undefined): ColumnReach {
+  return u?.reach ?? 'unknown';
 }
 
-// The qualifier text shown after the label, e.g. "read · certain".
-export function verdictChip(verdict: ColumnUsageVerdict): string {
-  const m = VERDICT_META[verdict];
-  return `${m.label} · ${m.suffix}`;
+// LIST sorting: float the "stored but not shown" signal (no-reader, then
+// server-only) to the very top, the blind spot below it, and the fully-resolved
+// shown columns last. So scanning the top of the list surfaces the insight.
+export function reachRank(reach: ColumnReach): number {
+  switch (reach) {
+    case 'never_read':
+      return 0;
+    case 'server_only':
+      return 1;
+    case 'unknown':
+      return 2;
+    case 'ui_shown':
+      return 3;
+  }
 }
 
-export interface ColumnUsageSummary {
+// Solid dot = certain (an explicitly-named read); ring = heuristic/untraceable.
+export function reachDot(reach: ColumnReach, certain: boolean): CSSProperties {
+  const c = REACH_META[reach].color;
+  return certain ? { background: c } : { background: 'transparent', border: `1.5px solid ${c}` };
+}
+
+export interface ReachSummary {
   total: number;
-  certain: number;
-  dead: number; // likely_dead
+  ui_shown: number;
+  server_only: number;
+  never_read: number;
   unknown: number;
 }
 
-export function summarizeColumnUsage(usage: ColumnUsage[]): ColumnUsageSummary {
-  const summary: ColumnUsageSummary = { total: usage.length, certain: 0, dead: 0, unknown: 0 };
-  for (const u of usage) {
-    if (u.verdict === 'used') summary.certain += 1;
-    else if (u.verdict === 'likely_dead') summary.dead += 1;
-    else if (u.verdict === 'unknown') summary.unknown += 1;
-  }
-  return summary;
+export function summarizeReach(usage: ColumnUsage[]): ReachSummary {
+  const s: ReachSummary = { total: usage.length, ui_shown: 0, server_only: 0, never_read: 0, unknown: 0 };
+  for (const u of usage) s[reachOf(u)] += 1;
+  return s;
 }
 
-// "12 columns · 3 no reads found · 2 unverifiable" — segments appear only when
-// they carry a count, so the headline stays glanceable.
-export function summaryText(summary: ColumnUsageSummary): string {
-  const parts = [`${summary.total} ${summary.total === 1 ? 'column' : 'columns'}`];
-  if (summary.dead > 0) parts.push(`${summary.dead} no reads found`);
-  if (summary.unknown > 0) parts.push(`${summary.unknown} unverifiable`);
-  return parts.join(' · ');
+// The contract headline: "N shown · M server-only · K no-reader · U untraceable".
+// Returned as colorable segments (one per reach state) so the consumer can tint
+// each count with its reach token.
+export interface ReachSegment {
+  reach: ColumnReach;
+  count: number;
+  label: string;
+}
+export function reachSummarySegments(s: ReachSummary): ReachSegment[] {
+  return [
+    { reach: 'ui_shown', count: s.ui_shown, label: 'shown' },
+    { reach: 'server_only', count: s.server_only, label: 'server-only' },
+    { reach: 'never_read', count: s.never_read, label: 'no-reader' },
+    { reach: 'unknown', count: s.unknown, label: 'untraceable' },
+  ];
 }

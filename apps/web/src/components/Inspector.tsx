@@ -1,6 +1,6 @@
-import type { DriftFinding, Graph, GraphNode } from '@throughline/core';
+import type { ColumnReach, DriftFinding, Graph, GraphNode } from '@throughline/core';
 import { buildAggregateExplainRequest, buildExplainContext } from '../lib/api';
-import { TRUST_META, langTag, severityVar, toneOf, toneVar } from '../lib/trust';
+import { effectiveVerdict, langTag, severityVar, toneOf, toneVar, verdictMeta } from '../lib/trust';
 import { ColumnUsageList } from './ColumnUsageList';
 import { ExplainPanel } from './ExplainPanel';
 import { SourceLink } from './SourceLink';
@@ -18,11 +18,13 @@ interface InspectorProps {
   graph: Graph | null;
   drift: DriftFinding[];
   aggregate?: AggregateSelection | null;
+  // Focus-view within-contract reach filter, applied to the column list.
+  reachFilter?: Set<ColumnReach>;
 }
 
 // §5C — the anchor of truth for a node. Reflects state from the selected node;
 // holds no independent copy of node properties.
-export function Inspector({ node, graph, drift, aggregate }: InspectorProps) {
+export function Inspector({ node, graph, drift, aggregate, reachFilter }: InspectorProps) {
   // Aggregate mode takes precedence: list the real individual touches behind a
   // lane node. These are reads/writes Throughline detected — not UI renders.
   if (aggregate) {
@@ -63,7 +65,8 @@ export function Inspector({ node, graph, drift, aggregate }: InspectorProps) {
     );
   }
 
-  const tone = toneOf(node.kind, node.trust);
+  const verdict = effectiveVerdict(node);
+  const tone = toneOf(node.kind, verdict);
   const color = toneVar(tone);
   const relatedDrift = drift.filter((d) => d.contractId === node.id);
 
@@ -85,11 +88,11 @@ export function Inspector({ node, graph, drift, aggregate }: InspectorProps) {
         <h2 className="mt-1 break-words font-mono text-lg text-neutral-100">{node.label}</h2>
       </div>
 
-      {/* Trust banner */}
-      {node.trust ? (
+      {/* Verdict banner — schemaMatch (aligned/mismatch) overrides trust when set. */}
+      {verdict ? (
         <div className="rounded-md border px-3 py-2 text-sm" style={{ borderColor: color, color }}>
-          <span className="font-semibold">{TRUST_META[node.trust].label}</span>
-          <span className="ml-2 text-neutral-400">{TRUST_META[node.trust].blurb}</span>
+          <span className="font-semibold">{verdictMeta(verdict).label}</span>
+          <span className="ml-2 text-neutral-400">{verdictMeta(verdict).blurb}</span>
         </div>
       ) : null}
 
@@ -100,7 +103,7 @@ export function Inspector({ node, graph, drift, aggregate }: InspectorProps) {
       {/* Columns — contracts only. With per-column read-usage verdicts when the
           analyzer provided them; otherwise the plain schema table. */}
       {node.columns && node.columnUsage && node.columnUsage.length > 0 ? (
-        <ColumnUsageList columns={node.columns} usage={node.columnUsage} />
+        <ColumnUsageList columns={node.columns} usage={node.columnUsage} reachFilter={reachFilter} />
       ) : node.columns ? (
         <div>
           <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-neutral-500">

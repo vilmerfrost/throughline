@@ -60,6 +60,7 @@ function layoutGraph(graph: Graph): { nodes: Node[]; edges: Edge[] } {
       label: n.label,
       kind: n.kind,
       trust: n.trust,
+      schemaMatch: n.schemaMatch,
       language: n.language,
       columnCount: n.columns?.length,
       filePath: n.source?.filePath,

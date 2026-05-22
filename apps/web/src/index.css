@@ -12,6 +12,11 @@
   --color-asserted: #dc2626;
   --color-dark: #1f2937;
   --color-untouched: #525252; /* contract with no touches — neutral, never green */
+  /* schema-match (deep-parsed writes) — a SEPARATE axis from trust. aligned is
+     teal, deliberately NOT the verified green: matched-now is weaker than
+     compiler-enforced. mismatch is a hot orange — the most alarming verdict. */
+  --color-aligned: #14b8a6;
+  --color-mismatch: #ea580c;
   /* edges */
   --color-edge-read: #93c5fd;
   --color-edge-write: #f87171;

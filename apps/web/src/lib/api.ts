@@ -89,7 +89,7 @@ export function buildAggregateExplainRequest(
 // Fetch the graph from the analyzer; fall back to the bundled mock on any error
 // so the web app always renders something.
 export async function fetchGraph(
-  repoPath = '/Users/vilmerfrost/Projects/Batch-Guard.ai-2',
+  repoPath = '/Users/vilmerfrost/Projects/batchgaurd.ai-2',
 ): Promise<GraphResult> {
   try {
     const res = await fetch(`${ANALYZER_URL}/analyze?path=${encodeURIComponent(repoPath)}`);

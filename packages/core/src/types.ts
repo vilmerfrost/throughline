@@ -24,6 +24,21 @@ export type NodeKind = 'contract' | 'touch' | 'boundary';
 // dark (black):      any/never/untyped JSON boundary — flow went blind
 export type Trust = 'verified' | 'narrowed' | 'asserted' | 'dark';
 
+// Stage 1a (ADDITIVE): how a deep-parsed write's serialized fields line up with
+// the SQL schema, computed independently of `trust`. This is NOT `trust` and is
+// NEVER folded into 'verified':
+//
+// aligned  the resolved fields match the schema as of now — Throughline-checked
+//          against the real struct/payload, NOT compiler-enforced.
+// mismatch a NOT-NULL column is missing or a written key is not in the schema —
+//          a real, field-level claim grounded in the resolved struct.
+// dark     the written value could not be resolved (dynamic map, conditional,
+//          spread, unknown builder return); we do NOT guess.
+//
+// Stage 1a only POPULATES this for Rust write touches; the displayed `trust`
+// stays as-is (Rust touches keep displaying dark). 1b switches the display.
+export type SchemaMatch = 'aligned' | 'mismatch' | 'dark';
+
 // Machine-readable reason a touch ended up at its trust level. The analyzer
 // owns this string; the explainer surfaces it instead of inventing reasons.
 export type TrustReason =
@@ -73,6 +88,7 @@ export interface ContractColumn {
   name: string;
   type: string;
   nullable?: boolean;
+  hasDefault?: boolean; // column has a DEFAULT — so it is OPTIONAL on insert even if NOT NULL
 }
 
 // How a single contract column is read by TypeScript code, with an HONEST
@@ -91,12 +107,27 @@ export type ColumnUsageVerdict =
   | 'likely_dead'
   | 'unknown';
 
+// WHERE a column's value travels once read — a separate axis from `verdict`
+// (which is about HOW/with-what-confidence it is read). Traced via
+// findReferences across files, with a conservative bias: in doubt → `unknown`.
+//
+// ui_shown    a read of this column resolves to a property access INSIDE JSX.
+// server_only read(s) resolve but ONLY outside JSX — never reaches a render.
+// never_read  no read references this column AND we traced confidently enough.
+// unknown     a read exists but the value escapes into untyped/unresolvable scope.
+export type ColumnReach = 'ui_shown' | 'server_only' | 'never_read' | 'unknown';
+
 export interface ColumnUsage {
   column: string;
   verdict: ColumnUsageVerdict;
   certain: boolean; // true ONLY for 'used'
   evidence: SourceRef[]; // real select/access sites that justify the verdict
   note: string; // e.g. "accessed as `batch.spice_density` in 2 places (heuristic)"
+  // B1 reach axis (additive, optional so existing consumers — incl. the offline
+  // mock — keep compiling and simply ignore it). The analyzer always populates
+  // it; the UI lands in B2.
+  reach?: ColumnReach; // WHERE the value travels
+  escapeTrail?: SourceRef[]; // for `unknown`: the reference chain up to where the trace was lost
 }
 
 export interface GraphNode {
@@ -108,6 +139,7 @@ export interface GraphNode {
   columnUsage?: ColumnUsage[]; // contract nodes only — per-column TS read verdicts
   trust?: Trust; // touch/boundary nodes
   trustReason?: TrustReason; // why the analyzer chose this trust level
+  schemaMatch?: SchemaMatch; // Stage 1a (additive): deep-parsed write touches only — struct-vs-schema verdict, separate from `trust`
   source?: SourceRef; // grounds the node in real code
   notes?: string; // short "what this does" explanation
 }
@@ -123,9 +155,51 @@ export interface GraphEdge {
 
 export interface DriftFinding {
   contractId: string;
-  message: string; // table-level risk, never an unproven column-level claim
+  // Table-level risk, OR a field-level claim that is PROVEN — i.e. grounded in a
+  // write payload whose fields were actually resolved (Stage 1a Rust). Never an
+  // unproven column-level guess.
+  message: string;
   severity: 'info' | 'warn' | 'error';
   source: SourceRef;
+}
+
+// RC-a (ADDITIVE): WHY an 'unresolved-origin' touch couldn't be traced to a
+// construction site — so the unresolved bucket becomes actionable. Structural,
+// deterministic, never guessed:
+//
+// parameter        the client arrives as a function/method parameter — fix =
+//                  type the parameter signature (the RootCause carries a couple
+//                  real signature refs as `evidence`).
+// ref              reached via a ref/closure indirection (e.g. supabaseRef.current).
+// imported-untyped an imported singleton that is untyped at its definition.
+// other            genuinely uncategorizable — used whenever unsure (never guess).
+export type UnresolvedShape = 'parameter' | 'ref' | 'imported-untyped' | 'other';
+
+// RC-a (ADDITIVE): the client construction a dark/asserted touch traces back to.
+// Resolved deterministically by following the `.from(...)` receiver's symbol to
+// its declaration — NEVER guessed. When the trace fails the touch is grouped
+// under the literal name 'unresolved-origin' with NO invented `source`, and a
+// `shape` records why it couldn't be resolved.
+export interface RootCauseOrigin {
+  name: string; // the constructor/helper that built the client (e.g. createServerClient), or 'unresolved-origin'
+  source?: SourceRef; // the construction site; absent ONLY for 'unresolved-origin'
+  shape?: UnresolvedShape; // set ONLY when name === 'unresolved-origin'
+}
+
+// RC-a (ADDITIVE): a deterministic rollup of dark/asserted TS touches that share
+// a (reason, client-origin). Pure grouping of facts already computed by the TS
+// analyzer — NO inference, NO LLM. The lever: "fix THIS construction → flip N
+// touches." Ranked biggest-lever-first by `affectedCount`.
+export interface RootCause {
+  reason: TrustReason; // why these touches are dark/asserted (e.g. 'ts-loose-client')
+  origin: RootCauseOrigin; // the shared client construction the touches trace to
+  affectedCount: number; // how many touches this root cause explains (== affectedTouchIds.length)
+  affectedTouchIds: string[]; // the touch node ids it explains
+  affectedContracts: string[]; // the contract (table) labels those touches hit
+  // RC-a addendum (additive): a capped sample of real grounding refs for an
+  // 'unresolved-origin' group — e.g. function signatures for the 'parameter'
+  // shape, so the fix site is visible even when there is no construction site.
+  evidence?: SourceRef[];
 }
 
 export interface Graph {
@@ -133,5 +207,8 @@ export interface Graph {
   nodes: GraphNode[];
   edges: GraphEdge[];
   drift: DriftFinding[];
+  // RC-a (additive, optional so existing consumers keep compiling): deterministic
+  // root-cause rollup of dark/asserted TS touches, ranked biggest-lever-first.
+  rootCauses?: RootCause[];
   generatedAt: string; // ISO 8601
 }

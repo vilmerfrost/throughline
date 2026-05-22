@@ -10,8 +10,10 @@ import { toneDotClass, toneVar } from '../lib/trust';
 export interface ContractSpineNodeData extends Record<string, unknown> {
   label: string;
   columnCount: number;
-  deadCount: number; // columns with no TS reads found (likely_dead)
-  unknownCount: number; // columns whose usage couldn't be traced (unknown)
+  // The "stored but not shown" reach signal: columns with no TS reader, and
+  // columns used server-side but never rendered.
+  neverReadCount: number; // reach === 'never_read'
+  serverOnlyCount: number; // reach === 'server_only'
   writtenNothingReads: boolean;
   readNothingWrites: boolean;
 }
@@ -47,11 +49,11 @@ function ContractSpineNodeBase({ data, selected }: NodeProps) {
           <div className="truncate font-mono text-base text-neutral-100">{d.label}</div>
           <div className="lod-hideable mt-0.5 text-[11px] text-neutral-500">
             {d.columnCount} columns
-            {d.deadCount > 0 ? (
-              <span style={{ color: 'var(--color-narrowed)' }}> · {d.deadCount} no reads found</span>
+            {d.neverReadCount > 0 ? (
+              <span style={{ color: 'var(--color-narrowed)' }}> · {d.neverReadCount} no reader</span>
             ) : null}
-            {d.unknownCount > 0 ? (
-              <span className="text-neutral-400"> · {d.unknownCount} unverifiable</span>
+            {d.serverOnlyCount > 0 ? (
+              <span style={{ color: 'var(--color-edge-read)' }}> · {d.serverOnlyCount} not shown</span>
             ) : null}
           </div>
 

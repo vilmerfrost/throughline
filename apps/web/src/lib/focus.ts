@@ -4,8 +4,9 @@ import type {
   Graph,
   GraphNode,
   Language,
-  Trust,
 } from '@throughline/core';
+import { effectiveVerdict, type Verdict } from './trust';
+import { summarizeReach, type ReachSummary } from './columnUsage';
 
 // The focus view is contract-centric: pick one contract and see its real data
 // flow as Writers -> Contract -> Readers. Everything here is derived from the
@@ -18,10 +19,10 @@ import type {
 // rendering.
 
 export interface FocusAggregate {
-  key: string; // `${direction}:${language}:${trust}` — stable id for selection
+  key: string; // `${direction}:${language}:${verdict}` — stable id for selection
   direction: EdgeDirection;
   language: Language;
-  trust: Trust;
+  verdict: Verdict; // effective verdict (schemaMatch overrides trust on deep-parsed writes)
   count: number;
   touchIds: string[]; // the individual touch node ids this aggregate rolls up
 }
@@ -32,7 +33,8 @@ export interface ContractSummary {
   columnCount: number;
   writeCount: number;
   readCount: number;
-  trust: Trust | null; // worst trust among ALL touches; null = no touches (untouched)
+  verdict: Verdict | null; // worst effective verdict among ALL touches; null = untouched
+  reach: ReachSummary; // per-reach column counts — drives the "columns present" filter
 }
 
 export interface FocusModel {
@@ -49,12 +51,21 @@ export interface FocusModel {
   drift: DriftFinding[];
 }
 
-// Worst trust wins: dark (blind) > asserted > narrowed > verified. Lower rank =
-// more blind, so it floats to the top of the list; an untouched contract (null,
-// no touches at all) sinks last — never confused with all-verified green.
-const TRUST_RANK: Record<Trust, number> = { dark: 0, asserted: 1, narrowed: 2, verified: 3 };
-export function trustRank(trust: Trust | null): number {
-  return trust === null ? 4 : TRUST_RANK[trust];
+// Worst verdict wins, worst → best: mismatch > dark > asserted > narrowed >
+// aligned > verified. Lower rank = worse, so it floats to the top of the list;
+// an untouched contract (null, no touches at all) sinks last — never confused
+// with all-verified green. Note aligned ranks BELOW verified: a table whose best
+// is aligned is honestly not "fully clean" (matched, but not compiler-enforced).
+const VERDICT_RANK: Record<Verdict, number> = {
+  mismatch: 0,
+  dark: 1,
+  asserted: 2,
+  narrowed: 3,
+  aligned: 4,
+  verified: 5,
+};
+export function verdictRank(verdict: Verdict | null): number {
+  return verdict === null ? 6 : VERDICT_RANK[verdict];
 }
 
 interface JoinedTouch {
@@ -74,26 +85,29 @@ function touchesFor(graph: Graph, contractId: string): JoinedTouch[] {
   return out;
 }
 
-// Worst (most-blind) trust among a contract's touches. null = no touches at all.
-// Only touches carrying a trust count — same honesty rule as aggregate().
-function worstTrust(touches: JoinedTouch[]): Trust | null {
-  let worst: Trust | null = null;
+// Worst effective verdict among a contract's touches. null = no touches at all.
+// Only touches carrying a verdict count — same honesty rule as aggregate().
+function worstVerdict(touches: JoinedTouch[]): Verdict | null {
+  let worst: Verdict | null = null;
   for (const { node } of touches) {
-    const t = node.trust;
-    if (!t) continue;
-    if (worst === null || TRUST_RANK[t] < TRUST_RANK[worst]) worst = t;
+    const v = effectiveVerdict(node);
+    if (!v) continue;
+    if (worst === null || VERDICT_RANK[v] < VERDICT_RANK[worst]) worst = v;
   }
   return worst;
 }
 
-// Roll touches up by (direction x language x trust). Aggregates are sorted by
-// count desc (then language) so the heaviest flows read first.
+// Roll touches up by (direction x language x effective verdict). Grouping by the
+// EFFECTIVE verdict (not raw trust) is what splits a contract's Rust writes into,
+// e.g., an "aligned ×3" lane and a "dark ×1" lane. Sorted by count desc, then
+// language, so the heaviest flows read first.
 function aggregate(touches: JoinedTouch[], direction: EdgeDirection): FocusAggregate[] {
   const byKey = new Map<string, FocusAggregate>();
   for (const { node, direction: dir } of touches) {
     if (dir !== direction) continue;
-    if (!node.language || !node.trust) continue; // keep counts honest, never guess
-    const key = `${dir}:${node.language}:${node.trust}`;
+    const verdict = effectiveVerdict(node);
+    if (!node.language || !verdict) continue; // keep counts honest, never guess
+    const key = `${dir}:${node.language}:${verdict}`;
     const existing = byKey.get(key);
     if (existing) {
       existing.count += 1;
@@ -103,7 +117,7 @@ function aggregate(touches: JoinedTouch[], direction: EdgeDirection): FocusAggre
         key,
         direction: dir,
         language: node.language,
-        trust: node.trust,
+        verdict,
         count: 1,
         touchIds: [node.id],
       });
@@ -114,9 +128,9 @@ function aggregate(touches: JoinedTouch[], direction: EdgeDirection): FocusAggre
   );
 }
 
-// All contracts with their counts + worst touch trust, sorted most-blind first
-// (dark -> asserted -> narrowed -> verified -> untouched), then alphabetically.
-// Drives the left-rail picker dot + order so the two always agree.
+// All contracts with their counts + worst touch verdict, sorted worst first
+// (mismatch -> dark -> asserted -> narrowed -> aligned -> verified -> untouched),
+// then alphabetically. Drives the left-rail picker dot + order so they agree.
 export function buildContractSummaries(graph: Graph): ContractSummary[] {
   const summaries = graph.nodes
     .filter((n) => n.kind === 'contract')
@@ -130,12 +144,13 @@ export function buildContractSummaries(graph: Graph): ContractSummary[] {
         columnCount: c.columns?.length ?? 0,
         writeCount,
         readCount,
-        trust: worstTrust(touches),
+        verdict: worstVerdict(touches),
+        reach: summarizeReach(c.columnUsage ?? []),
       };
     });
 
   return summaries.sort(
-    (a, b) => trustRank(a.trust) - trustRank(b.trust) || a.label.localeCompare(b.label),
+    (a, b) => verdictRank(a.verdict) - verdictRank(b.verdict) || a.label.localeCompare(b.label),
   );
 }
 
