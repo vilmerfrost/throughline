@@ -7,6 +7,10 @@ import {
   type TrustReason,
   type SchemaMatch,
   type Language,
+  type Graph,
+  type ColumnReach,
+  type Cardinality,
+  type DriftFinding,
 } from '@throughline/core';
 
 export type Confidence = 'certain' | 'heuristic';
@@ -60,4 +64,151 @@ export function touchFact(node: GraphNode): TouchFact {
     scope: { level: 'table', depth: depthForNode(node) },
     source: node.source,
   };
+}
+
+// --- shared lookups -------------------------------------------------------
+
+function contractNode(graph: Graph, table: string): GraphNode | undefined {
+  return graph.nodes.find(
+    (n) => n.kind === 'contract' && n.label === table,
+  );
+}
+
+function isKnownContract(graph: Graph, table: string): boolean {
+  return graph.nodes.some((n) => n.kind === 'contract' && n.label === table);
+}
+
+function touchesForContract(
+  graph: Graph,
+  contractId: string,
+): { readers: GraphNode[]; writers: GraphNode[] } {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const readers: GraphNode[] = [];
+  const writers: GraphNode[] = [];
+  for (const e of graph.edges) {
+    if (e.target !== contractId) continue;
+    const touch = byId.get(e.source);
+    if (!touch) continue;
+    (e.direction === 'write' ? writers : readers).push(touch);
+  }
+  return { readers, writers };
+}
+
+// --- FK neighbors ---------------------------------------------------------
+
+export interface FkNeighbor {
+  direction: 'references' | 'referenced-by';
+  fromTable: string;
+  fromColumn: string;
+  toTable: string;
+  toColumn: string;
+  cardinality: Cardinality;
+  external: boolean; // the OTHER table is not a known contract in this graph
+  source: SourceRef;
+}
+
+export function fkNeighbors(table: string, graph: Graph): FkNeighbor[] {
+  const rels = graph.relationships ?? [];
+  const out: FkNeighbor[] = [];
+  for (const r of rels) {
+    if (r.fromTable === table) {
+      out.push({
+        direction: 'references',
+        fromTable: r.fromTable,
+        fromColumn: r.fromColumn,
+        toTable: r.toTable,
+        toColumn: r.toColumn,
+        cardinality: r.cardinality,
+        external: !isKnownContract(graph, r.toTable),
+        source: r.source,
+      });
+    }
+    if (r.toTable === table) {
+      out.push({
+        direction: 'referenced-by',
+        fromTable: r.fromTable,
+        fromColumn: r.fromColumn,
+        toTable: r.toTable,
+        toColumn: r.toColumn,
+        cardinality: r.cardinality,
+        external: !isKnownContract(graph, r.fromTable),
+        source: r.source,
+      });
+    }
+  }
+  return out;
+}
+
+// --- table facts ----------------------------------------------------------
+
+export interface ColumnFact {
+  name: string;
+  type: string;
+  nullable?: boolean;
+  hasDefault?: boolean;
+  reach?: ColumnReach;
+  reachConfidence?: Confidence;
+  escapeTrail?: SourceRef[];
+}
+
+export interface DriftFact {
+  message: string;
+  severity: DriftFinding['severity'];
+  source: SourceRef;
+}
+
+export interface TableFacts {
+  table: string;
+  found: boolean;
+  analyzed_at: string;
+  columns: ColumnFact[];
+  touches: { writers: TouchFact[]; readers: TouchFact[] };
+  drift: DriftFact[];
+  fkNeighbors: FkNeighbor[];
+  scope: { level: 'table' };
+}
+
+export function getTableFacts(name: string, graph: Graph): TableFacts {
+  const contract = contractNode(graph, name);
+  const base: TableFacts = {
+    table: name,
+    found: Boolean(contract),
+    analyzed_at: graph.generatedAt,
+    columns: [],
+    touches: { writers: [], readers: [] },
+    drift: [],
+    fkNeighbors: fkNeighbors(name, graph),
+    scope: { level: 'table' },
+  };
+  if (!contract) return base;
+
+  const usageByCol = new Map(
+    (contract.columnUsage ?? []).map((u) => [u.column, u]),
+  );
+  base.columns = (contract.columns ?? []).map((c) => {
+    const u = usageByCol.get(c.name);
+    return {
+      name: c.name,
+      type: c.type,
+      nullable: c.nullable,
+      hasDefault: c.hasDefault,
+      reach: u?.reach,
+      reachConfidence: u
+        ? u.certain
+          ? 'certain'
+          : 'heuristic'
+        : undefined,
+      escapeTrail: u?.escapeTrail,
+    };
+  });
+
+  const { readers, writers } = touchesForContract(graph, contract.id);
+  base.touches.readers = readers.map(touchFact);
+  base.touches.writers = writers.map(touchFact);
+
+  base.drift = graph.drift
+    .filter((d) => d.contractId === contract.id)
+    .map((d) => ({ message: d.message, severity: d.severity, source: d.source }));
+
+  return base;
 }
