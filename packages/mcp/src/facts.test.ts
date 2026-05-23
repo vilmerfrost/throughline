@@ -93,3 +93,24 @@ test('getFileFacts: unknown file returns found:false with analyzed_at', () => {
   assert.equal(f.found, false);
   assert.equal(f.analyzed_at, '2026-05-23T12:00:00.000Z');
 });
+
+import { getNodeContext } from './facts.js';
+
+test('getNodeContext: a touch drills into trust, contract, and neighbors', () => {
+  const ctx = getNodeContext('touch:ts:src/ui/Batch.tsx:10:batches', sampleGraph);
+  assert.equal(ctx.found, true);
+  assert.equal(ctx.node?.trust, 'verified');
+  assert.equal(ctx.node?.confidence, 'certain');
+  assert.equal(ctx.contract?.table, 'batches');
+  assert.ok(ctx.contract?.columns.some((c) => c.name === 'spice_density'));
+  // sibling = the python writer on the same contract, excluding self
+  assert.equal(ctx.neighbors.siblingTouches.length, 1);
+  assert.equal(ctx.neighbors.siblingTouches[0].nodeId, 'touch:python:scripts/seed.py:3:batches');
+  assert.equal(ctx.neighbors.fkNeighbors.length, 1);
+});
+
+test('getNodeContext: unknown nodeId returns found:false with analyzed_at', () => {
+  const ctx = getNodeContext('touch:ts:nope:1:x', sampleGraph);
+  assert.equal(ctx.found, false);
+  assert.equal(ctx.analyzed_at, '2026-05-23T12:00:00.000Z');
+});

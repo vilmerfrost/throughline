@@ -265,3 +265,66 @@ export function getFileFacts(path: string, graph: Graph): FileFacts {
     touches,
   };
 }
+
+// --- node context -----------------------------------------------------------
+
+export interface NodeContext {
+  found: boolean;
+  analyzed_at: string;
+  node?: TouchFact;
+  contract?: { table: string; columns: ColumnFact[] };
+  neighbors: {
+    siblingTouches: TouchFact[]; // other touches on the same contract (capped)
+    fkNeighbors: FkNeighbor[];
+  };
+}
+
+const SIBLING_CAP = 20;
+
+export function getNodeContext(nodeId: string, graph: Graph): NodeContext {
+  const node = graph.nodes.find((n) => n.id === nodeId && n.kind === 'touch');
+  const empty: NodeContext = {
+    found: Boolean(node),
+    analyzed_at: graph.generatedAt,
+    neighbors: { siblingTouches: [], fkNeighbors: [] },
+  };
+  if (!node) return empty;
+
+  empty.node = touchFact(node);
+
+  // The contract this touch points at (via its edge target).
+  const edge = graph.edges.find((e) => e.source === node.id);
+  if (edge) {
+    const contract = graph.nodes.find(
+      (n) => n.id === edge.target && n.kind === 'contract',
+    );
+    if (contract) {
+      const usageByCol = new Map(
+        (contract.columnUsage ?? []).map((u) => [u.column, u]),
+      );
+      empty.contract = {
+        table: contract.label,
+        columns: (contract.columns ?? []).map((c) => {
+          const u = usageByCol.get(c.name);
+          return {
+            name: c.name,
+            type: c.type,
+            nullable: c.nullable,
+            hasDefault: c.hasDefault,
+            reach: u?.reach,
+            reachConfidence: u ? (u.certain ? 'certain' : 'heuristic') : undefined,
+            escapeTrail: u?.escapeTrail,
+          };
+        }),
+      };
+      const { readers, writers } = touchesForContract(graph, contract.id);
+      empty.neighbors.siblingTouches = [...readers, ...writers]
+        .filter((t) => t.id !== node.id)
+        .slice(0, SIBLING_CAP)
+        .map(touchFact);
+      empty.neighbors.fkNeighbors = fkNeighbors(contract.label, graph);
+    }
+  }
+
+  return empty;
+}
