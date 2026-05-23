@@ -12,6 +12,8 @@ import {
   type Cardinality,
   type DriftFinding,
   type EdgeDirection,
+  type RootCause,
+  type UnresolvedShape,
 } from '@throughline/core';
 
 export type Confidence = 'certain' | 'heuristic';
@@ -327,4 +329,41 @@ export function getNodeContext(nodeId: string, graph: Graph): NodeContext {
   }
 
   return empty;
+}
+
+// --- root cause facts -------------------------------------------------------
+
+export interface RootCauseFact {
+  reason: TrustReason;
+  reasonDescription: string;
+  origin: { name: string; shape?: UnresolvedShape; source?: SourceRef };
+  affectedCount: number;
+  affectedTouchIds: string[];
+  affectedContracts: string[];
+  evidence?: SourceRef[];
+  // The rollup is a deterministic grouping of already-resolved analyzer facts,
+  // so the lever itself is certain. (Individual touches keep their own.)
+  confidence: Confidence;
+}
+
+export interface RootCauseFacts {
+  analyzed_at: string;
+  rootCauses: RootCauseFact[];
+}
+
+export function getRootCauseFacts(graph: Graph): RootCauseFacts {
+  const ranked: RootCause[] = graph.rootCauses ?? [];
+  return {
+    analyzed_at: graph.generatedAt,
+    rootCauses: ranked.map((rc) => ({
+      reason: rc.reason,
+      reasonDescription: TRUST_REASON_DESCRIPTIONS[rc.reason],
+      origin: { name: rc.origin.name, shape: rc.origin.shape, source: rc.origin.source },
+      affectedCount: rc.affectedCount,
+      affectedTouchIds: rc.affectedTouchIds,
+      affectedContracts: rc.affectedContracts,
+      evidence: rc.evidence,
+      confidence: 'certain',
+    })),
+  };
 }

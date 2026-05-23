@@ -114,3 +114,20 @@ test('getNodeContext: unknown nodeId returns found:false with analyzed_at', () =
   assert.equal(ctx.found, false);
   assert.equal(ctx.analyzed_at, '2026-05-23T12:00:00.000Z');
 });
+
+import { getRootCauseFacts } from './facts.js';
+
+test('getRootCauseFacts: passes through ranked levers with reason description + grounding', () => {
+  const rc = getRootCauseFacts(sampleGraph);
+  assert.equal(rc.analyzed_at, '2026-05-23T12:00:00.000Z');
+  assert.equal(rc.rootCauses.length, 1);
+  const lever = rc.rootCauses[0];
+  assert.equal(lever.reason, 'ts-loose-client');
+  assert.match(lever.reasonDescription, /SupabaseClient/);
+  assert.equal(lever.origin.name, 'unresolved-origin');
+  assert.equal(lever.origin.shape, 'parameter');
+  assert.equal(lever.affectedCount, 1);
+  assert.deepEqual(lever.affectedContracts, ['batches']);
+  assert.equal(lever.evidence?.length, 1);
+  assert.equal(lever.confidence, 'certain'); // deterministic rollup of resolved facts
+});
