@@ -2,6 +2,10 @@
   "name": "@throughline/analyzer",
   "version": "0.0.0",
   "type": "module",
+  "exports": {
+    "./buildGraph": "./src/buildGraph.ts",
+    "./sql/parseSql": "./src/sql/parseSql.ts"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
