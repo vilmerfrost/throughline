@@ -3,6 +3,7 @@ import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import type { ContractColumn, DriftFinding, GraphNode, SchemaMatch, SourceRef } from '@throughline/core';
 import { parseRustSource, type RustNode } from './parseRust.js';
+import { compareWriteFields } from '../schema/compareFields.js';
 
 // Deep-parse Rust write sites and compare the SERIALIZED FIELDS of each write
 // against the SQL schema. This replaces the shallow "all Rust writes are blind"
@@ -179,29 +180,17 @@ async function walk(dir: string, out: string[]): Promise<void> {
 // Comparison
 // ---------------------------------------------------------------------------
 
+// An unresolved payload is `dark` (no name-level claim possible); otherwise we
+// delegate the name-vs-schema verdict to the ONE shared comparison that
+// check_write also uses, so the two can never disagree.
 function compare(
   resolved: ResolvedBody | null,
   verb: RustWriteSite['verb'],
   columns: ContractColumn[],
 ): { schemaMatch: SchemaMatch; missing: string[]; unknown: string[] } {
   if (!resolved) return { schemaMatch: 'dark', missing: [], unknown: [] };
-
-  const columnNames = new Set(columns.map((c) => c.name));
-  const keys = new Set(resolved.keys);
-  const unknown = resolved.keys.filter((k) => !columnNames.has(k));
-  // A column is only REQUIRED on insert when it is NOT NULL *and has no DEFAULT*:
-  // Postgres fills a defaulted column, so omitting it is legal. On a partial
-  // PATCH/PUT update nothing is required, so we never flag a missing column there.
-  const missing =
-    verb === 'insert'
-      ? columns
-          .filter((c) => c.nullable === false && !c.hasDefault && !keys.has(c.name))
-          .map((c) => c.name)
-      : [];
-
-  const schemaMatch: SchemaMatch =
-    unknown.length === 0 && missing.length === 0 ? 'aligned' : 'mismatch';
-  return { schemaMatch, missing, unknown };
+  const r = compareWriteFields(resolved.keys, verb, columns);
+  return { schemaMatch: r.schemaMatch, missing: r.missingRequired, unknown: r.unknownKeys };
 }
 
 function buildDrift(

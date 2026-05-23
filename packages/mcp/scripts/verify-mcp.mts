@@ -54,9 +54,9 @@ async function main() {
     ? pass('no verdict-mutating tool exists')
     : fail(`found mutating-looking tool(s): ${mutators.join(', ')}`);
 
-  const expected = ['get_file', 'get_node_context', 'get_root_causes', 'get_table', 'reanalyze'];
+  const expected = ['check_write', 'get_file', 'get_node_context', 'get_root_causes', 'get_table', 'reanalyze'];
   expected.every((e: string) => names.includes(e))
-    ? pass('all five read-only tools registered')
+    ? pass('all six read-only/pure tools registered')
     : fail(`missing tools; got ${names.join(', ')}`);
 
   const carriesAnalyzedAt = (o: any, label: string) =>
@@ -121,6 +121,98 @@ async function main() {
           `batches: BatchInsertPayload aligned deep-parsed Rust write present @ ${alignedRust.source.filePath}:${alignedRust.source.startLine} (schemaMatch=aligned)`,
         )
       : fail('batches: no aligned deep-parsed Rust write (BatchInsertPayload, schemaMatch=aligned) found');
+  }
+
+  // --- check_write — preventive, PURE. Must change NOTHING. -----------------
+  // Capture analyzed_at BEFORE any check_write call; re-read it AFTER to prove
+  // the tool mutated nothing.
+  const analyzedAtBefore = tables['batches'].analyzed_at;
+  const cw = (table: string, fields: string[], verb: 'insert' | 'update') =>
+    client
+      .callTool({ name: 'check_write', arguments: { table, fields, verb } })
+      .then(structured);
+
+  // Named case A — events_log: a write that includes the real columns PLUS the
+  // bogus `previous_hash` key must be caught preventively as would_mismatch with
+  // previous_hash in unknownKeys. This is the exact bug check_write exists to stop.
+  {
+    const realCols = (tables['events_log'].columns ?? []).map((c: any) => c.name);
+    const r = await cw('events_log', [...realCols, 'previous_hash'], 'insert');
+    r.verdict === 'would_mismatch' && (r.unknownKeys ?? []).includes('previous_hash')
+      ? pass(`check_write(events_log, +previous_hash, insert) → would_mismatch, unknownKeys⊇[previous_hash]`)
+      : fail(`check_write(events_log,+previous_hash) expected would_mismatch w/ previous_hash; got ${JSON.stringify(r.verdict)} unknownKeys=${JSON.stringify(r.unknownKeys)}`);
+    // Honest framing: grounded in real columns, schema-snapshot scope, never 'verified'.
+    Array.isArray(r.checkedAgainst) && r.checkedAgainst.length > 0 &&
+    r.scope === 'column-level · schema-snapshot' &&
+    typeof r.analyzed_at === 'string' &&
+    !/verified/i.test(JSON.stringify(r))
+      ? pass(`check_write carries checkedAgainst(${r.checkedAgainst.length}) + scope + analyzed_at, no 'verified' claim`)
+      : fail(`check_write(events_log) missing grounding/scope/analyzed_at or overclaims 'verified': ${JSON.stringify(r)}`);
+  }
+
+  // Named case B — batches: writing the table's full column set on insert aligns.
+  {
+    const allCols = (tables['batches'].columns ?? []).map((c: any) => c.name);
+    const r = await cw('batches', allCols, 'insert');
+    r.verdict === 'would_align' && (r.unknownKeys ?? []).length === 0 && (r.missingRequired ?? []).length === 0
+      ? pass(`check_write(batches, all columns, insert) → would_align`)
+      : fail(`check_write(batches, all cols) expected would_align; got ${JSON.stringify(r.verdict)} missing=${JSON.stringify(r.missingRequired)} unknown=${JSON.stringify(r.unknownKeys)}`);
+  }
+
+  // Named case C — batches: omitting a NOT-NULL-without-default column is a
+  // mismatch on insert (missingRequired lists it) but ALIGNS as an update
+  // (partial writes are fine). A schema with no such column is a hard FAIL — the
+  // spec asserts this case exists; a silent skip would be a false green.
+  {
+    const cols = tables['batches'].columns ?? [];
+    const required = cols.filter((c: any) => c.nullable === false && !c.hasDefault);
+    if (required.length === 0) {
+      fail('check_write(batches): no NOT-NULL-without-default column exists to exercise missingRequired — schema regression or wrong target');
+    } else {
+      const omit = required[0].name;
+      const partial = cols.map((c: any) => c.name).filter((n: string) => n !== omit);
+      const ins = await cw('batches', partial, 'insert');
+      ins.verdict === 'would_mismatch' && (ins.missingRequired ?? []).includes(omit)
+        ? pass(`check_write(batches, omit NOT-NULL \`${omit}\`, insert) → would_mismatch, missingRequired⊇[${omit}]`)
+        : fail(`check_write(batches, omit ${omit}, insert) expected would_mismatch listing ${omit}; got ${JSON.stringify(ins.verdict)} missing=${JSON.stringify(ins.missingRequired)}`);
+      const upd = await cw('batches', partial, 'update');
+      upd.verdict === 'would_align'
+        ? pass(`check_write(batches, same partial, update) → would_align (partial writes are fine)`)
+        : fail(`check_write(batches, partial, update) expected would_align; got ${JSON.stringify(upd.verdict)}`);
+    }
+  }
+
+  // Named case D — batches: omitting ONLY a NOT-NULL-WITH-default column on insert
+  // still aligns (the default fills it).
+  {
+    const cols = tables['batches'].columns ?? [];
+    const defaulted = cols.filter((c: any) => c.nullable === false && c.hasDefault);
+    if (defaulted.length === 0) {
+      fail('check_write(batches): no NOT-NULL-with-default column exists to exercise the default-covers-it rule — schema regression or wrong target');
+    } else {
+      const omit = defaulted[0].name;
+      const fields = cols.map((c: any) => c.name).filter((n: string) => n !== omit);
+      const r = await cw('batches', fields, 'insert');
+      r.verdict === 'would_align'
+        ? pass(`check_write(batches, omit defaulted \`${omit}\`, insert) → would_align (default covers it)`)
+        : fail(`check_write(batches, omit defaulted ${omit}) expected would_align; got ${JSON.stringify(r.verdict)} missing=${JSON.stringify(r.missingRequired)}`);
+    }
+  }
+
+  // Named case E — unknown table: say so, NO fabricated verdict.
+  {
+    const r = await cw('nonexistent_table', ['anything'], 'insert');
+    r.found === false && r.verdict === undefined
+      ? pass(`check_write(nonexistent_table) → found:false, no fabricated verdict`)
+      : fail(`check_write(nonexistent_table) expected found:false & no verdict; got found=${r.found} verdict=${JSON.stringify(r.verdict)}`);
+  }
+
+  // Invariant — check_write is PURE: analyzed_at is UNCHANGED after all the calls.
+  {
+    const after = structured(await client.callTool({ name: 'get_table', arguments: { name: 'batches' } })).analyzed_at;
+    after === analyzedAtBefore
+      ? pass(`check_write mutated nothing: analyzed_at unchanged (${after})`)
+      : fail(`check_write mutated state: analyzed_at ${analyzedAtBefore} -> ${after}`);
   }
 
   const rc = structured(await client.callTool({ name: 'get_root_causes', arguments: {} }));

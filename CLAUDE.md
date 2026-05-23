@@ -93,7 +93,14 @@ is verified by a real-repo report script, not just unit tests (see Conventions).
   cardinality inference. Surfaced as the FK neighborhood band in the focus view.
   (`sql/parseSql.ts` `parseSchema`, `RelationshipBand.tsx`, `lib/relationships.ts`)
 - **MCP server** — `@throughline/mcp` calls `buildGraph` in-process and exposes
-  the graph's grounded facts to agents via `@modelcontextprotocol/sdk`. (`packages/mcp/`)
+  the graph's grounded facts to agents via `@modelcontextprotocol/sdk`. Read-only
+  tools: `get_table`, `get_file`, `get_node_context`, `get_root_causes`,
+  `reanalyze` (the only way a verdict moves — re-derives from disk). Plus
+  `check_write` (MCP Stage 2) — a **pure, preventive** validation of a *proposed*
+  insert/update against the schema (`would_align`/`would_mismatch`, names+presence
+  only, never type-checks values, mutates nothing). It reuses the analyzer's ONE
+  shared field comparison (`schema/compareFields.ts` `compareWriteFields`) so the
+  Rust write analyzer and `check_write` can never disagree. (`packages/mcp/`)
 
 **In progress / next:** B2 (reach axis in the UI). Uncommitted work currently on
 disk touches `RelationshipBand`, `lib/relationships.ts`, and FK tests.
@@ -174,7 +181,8 @@ throughline/
 | `packages/core/src/types.ts` | The entire data model + design intent in doc-comments. Single source of truth for the contract/touch/trust/drift/RootCause/Relationship shapes. **Read before changing the model.** |
 | `packages/analyzer/src/index.ts` | Express server + endpoints (`/health` `/analyze` `/explain` `/fix-prompt`) + hardcoded default-repo resolution |
 | `packages/analyzer/src/buildGraph.ts` | `buildGraph(repoPath)` — composes all analyzer stages into a `Graph`. Extracted from `index.ts` so the MCP server can call it in-process without booting Express. |
-| `packages/mcp/src/index.ts` + `facts.ts` | MCP server entry + the tools that turn a `Graph` into agent-readable facts |
+| `packages/mcp/src/index.ts` + `server.ts` + `facts.ts` | MCP server entry + tool registration + the functions that turn a `Graph` into agent-readable facts (incl. `checkWrite`) |
+| `packages/analyzer/src/schema/compareFields.ts` | `compareWriteFields` — the ONE pure field-names-vs-schema comparison shared by the Rust write analyzer and MCP `check_write` (insert/update rules + `hasDefault`); exported via `@throughline/analyzer/schema/compareFields` |
 | `packages/analyzer/src/sql/parseSql.ts` | `parseSchema` — SQL contract nodes (via `pgsql-ast-parser`) + FK-A1 declared relationships |
 | `packages/analyzer/src/ts/parseTs.ts` | Deep TS analyzer (`ts-morph`): trust classification, touches, edges, root causes |
 | `packages/analyzer/src/ts/columnUsage.ts` | Per-column read verdicts attached to contract nodes |

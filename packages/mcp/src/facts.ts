@@ -15,6 +15,7 @@ import {
   type RootCause,
   type UnresolvedShape,
 } from '@throughline/core';
+import { compareWriteFields } from '@throughline/analyzer/schema/compareFields';
 
 export type Confidence = 'certain' | 'heuristic';
 export interface Scope {
@@ -365,5 +366,73 @@ export function getRootCauseFacts(graph: Graph): RootCauseFacts {
       evidence: rc.evidence,
       confidence: 'certain',
     })),
+  };
+}
+
+// --- check_write (preventive, PURE) -----------------------------------------
+
+export type CheckWriteVerb = 'insert' | 'update';
+export type WriteVerdict = 'would_align' | 'would_mismatch';
+
+export interface CheckWriteResult {
+  table: string;
+  found: boolean; // is `table` a scanned contract in this graph?
+  verb: CheckWriteVerb;
+  verdict?: WriteVerdict; // omitted entirely for an unknown table — never fabricated
+  missingRequired: string[]; // insert-only: NOT-NULL-without-default columns absent
+  unknownKeys: string[]; // proposed field names that are not columns
+  checkedAgainst: string[]; // grounding: the schema columns this was compared to
+  // Honest scope label. NOT 'verified': names + presence only, no value type-check,
+  // and only as of analyzed_at — not a runtime or compiler guarantee.
+  scope: 'column-level · schema-snapshot';
+  analyzed_at: string;
+  note: string;
+}
+
+const CHECK_WRITE_CAVEAT =
+  'Schema-snapshot check as of analyzed_at: field NAMES + presence only — values are NOT ' +
+  'type-checked, and this is NOT a runtime or compiler guarantee. If the schema may have ' +
+  'changed since analyzed_at, call reanalyze() first.';
+
+// PURE EVALUATION. Validates a PROPOSED write against the schema BEFORE the code
+// is written. Changes NOTHING — no verdict moves, nothing is recorded, analyzed_at
+// is untouched. Reuses the ONE shared comparison the Rust analyzer uses, so the
+// two can never disagree. Checks NAMES only (presence + unknown keys); it does
+// not type-check values, and the verdict is a schema-snapshot, not a guarantee.
+export function checkWrite(
+  table: string,
+  fields: string[],
+  verb: CheckWriteVerb,
+  graph: Graph,
+): CheckWriteResult {
+  const contract = contractNode(graph, table);
+  if (!contract) {
+    // Unknown table → say so, NO fabricated verdict.
+    return {
+      table,
+      found: false,
+      verb,
+      missingRequired: [],
+      unknownKeys: [],
+      checkedAgainst: [],
+      scope: 'column-level · schema-snapshot',
+      analyzed_at: graph.generatedAt,
+      note: `\`${table}\` is not a scanned contract in this graph — no verdict. ${CHECK_WRITE_CAVEAT}`,
+    };
+  }
+
+  const columns = contract.columns ?? [];
+  const cmp = compareWriteFields(fields, verb, columns);
+  return {
+    table,
+    found: true,
+    verb,
+    verdict: cmp.schemaMatch === 'aligned' ? 'would_align' : 'would_mismatch',
+    missingRequired: cmp.missingRequired,
+    unknownKeys: cmp.unknownKeys,
+    checkedAgainst: columns.map((c) => c.name),
+    scope: 'column-level · schema-snapshot',
+    analyzed_at: graph.generatedAt,
+    note: CHECK_WRITE_CAVEAT,
   };
 }

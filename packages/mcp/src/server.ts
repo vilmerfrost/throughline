@@ -6,6 +6,7 @@ import {
   getFileFacts,
   getNodeContext,
   getRootCauseFacts,
+  checkWrite,
 } from './facts.js';
 
 // Wrap a structured object as an MCP tool result: machine-readable
@@ -65,6 +66,21 @@ export function createServer(cache: GraphCache): McpServer {
       inputSchema: {},
     },
     async () => ok(getRootCauseFacts(cache.graph)),
+  );
+
+  server.registerTool(
+    'check_write',
+    {
+      title: 'Check a proposed write against the schema (preventive)',
+      description:
+        'Pure evaluation — changes NOTHING (no verdict moves, nothing recorded, analyzed_at untouched). Validate a PROPOSED insert/update BEFORE writing the code: compares field NAMES against the table columns (presence + unknown keys only — does NOT type-check values). insert flags NOT-NULL-without-default columns that are missing (missingRequired) plus unknown keys; update flags only unknown keys (partial writes are fine). Verdict is would_align / would_mismatch as of analyzed_at — a schema-snapshot check, NOT a runtime or compiler guarantee; call reanalyze() first if the schema may be stale. Unknown table → no verdict, never fabricated. Reuses the same comparison as the Rust write analyzer.',
+      inputSchema: {
+        table: z.string().describe('Bare table name, e.g. "events_log"'),
+        fields: z.array(z.string()).describe('Proposed field names the write would set'),
+        verb: z.enum(['insert', 'update']).describe('insert (full row) or update (partial)'),
+      },
+    },
+    async ({ table, fields, verb }) => ok(checkWrite(table, fields, verb, cache.graph)),
   );
 
   server.registerTool(

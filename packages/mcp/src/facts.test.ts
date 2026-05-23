@@ -115,6 +115,53 @@ test('getNodeContext: unknown nodeId returns found:false with analyzed_at', () =
   assert.equal(ctx.analyzed_at, '2026-05-23T12:00:00.000Z');
 });
 
+import { checkWrite } from './facts.js';
+
+test('checkWrite: insert with only optional/defaulted columns present → would_align', () => {
+  // batches: id is NOT NULL but has a default; recipe/spice_density are nullable.
+  const r = checkWrite('batches', ['recipe', 'spice_density'], 'insert', sampleGraph);
+  assert.equal(r.found, true);
+  assert.equal(r.verdict, 'would_align');
+  assert.deepEqual(r.missingRequired, []);
+  assert.deepEqual(r.unknownKeys, []);
+  assert.deepEqual(r.checkedAgainst, ['id', 'recipe', 'spice_density']);
+  assert.equal(r.scope, 'column-level · schema-snapshot');
+  assert.equal(r.analyzed_at, '2026-05-23T12:00:00.000Z');
+  // Never claims runtime/compiler enforcement.
+  assert.doesNotMatch(JSON.stringify(r), /verified/i);
+});
+
+test('checkWrite: unknown key → would_mismatch listing it (names only)', () => {
+  const r = checkWrite('batches', ['recipe', 'previous_hash'], 'insert', sampleGraph);
+  assert.equal(r.verdict, 'would_mismatch');
+  assert.deepEqual(r.unknownKeys, ['previous_hash']);
+  assert.deepEqual(r.missingRequired, []);
+});
+
+test('checkWrite: update never flags missing columns but still flags unknown keys', () => {
+  const r = checkWrite('batches', ['recipe', 'bogus'], 'update', sampleGraph);
+  assert.equal(r.verdict, 'would_mismatch');
+  assert.deepEqual(r.unknownKeys, ['bogus']);
+  assert.deepEqual(r.missingRequired, []);
+});
+
+test('checkWrite: unknown table → found:false, NO fabricated verdict, carries analyzed_at', () => {
+  const r = checkWrite('not_a_table', ['x'], 'insert', sampleGraph);
+  assert.equal(r.found, false);
+  assert.equal(r.verdict, undefined);
+  assert.deepEqual(r.checkedAgainst, []);
+  assert.equal(r.analyzed_at, '2026-05-23T12:00:00.000Z');
+});
+
+test('checkWrite: PURE — does not mutate the graph (analyzed_at + node count unchanged)', () => {
+  const at = sampleGraph.generatedAt;
+  const count = sampleGraph.nodes.length;
+  checkWrite('batches', ['recipe', 'previous_hash'], 'insert', sampleGraph);
+  checkWrite('not_a_table', ['x'], 'update', sampleGraph);
+  assert.equal(sampleGraph.generatedAt, at);
+  assert.equal(sampleGraph.nodes.length, count);
+});
+
 import { getRootCauseFacts } from './facts.js';
 
 test('getRootCauseFacts: passes through ranked levers with reason description + grounding', () => {
