@@ -11,6 +11,7 @@ import {
   type ColumnReach,
   type Cardinality,
   type DriftFinding,
+  type EdgeDirection,
 } from '@throughline/core';
 
 export type Confidence = 'certain' | 'heuristic';
@@ -211,4 +212,56 @@ export function getTableFacts(name: string, graph: Graph): TableFacts {
     .map((d) => ({ message: d.message, severity: d.severity, source: d.source }));
 
   return base;
+}
+
+// --- file facts -----------------------------------------------------------
+
+export interface FileTouchFact extends TouchFact {
+  direction?: EdgeDirection; // read/write toward the table(s)
+  tablesTouched: string[];
+}
+
+export interface FileFacts {
+  path: string;
+  found: boolean;
+  analyzed_at: string;
+  touches: FileTouchFact[];
+}
+
+// Normalize an incoming path to the repo-relative form stored on SourceRef.
+function toRelative(graph: Graph, p: string): string {
+  const root = graph.repoPath.endsWith('/') ? graph.repoPath : graph.repoPath + '/';
+  return p.startsWith(root) ? p.slice(root.length) : p;
+}
+
+export function getFileFacts(path: string, graph: Graph): FileFacts {
+  const rel = toRelative(graph, path);
+  const labelById = new Map(graph.nodes.map((n) => [n.id, n.label]));
+  const edgesBySource = new Map<string, typeof graph.edges>();
+  for (const e of graph.edges) {
+    const arr = edgesBySource.get(e.source) ?? [];
+    arr.push(e);
+    edgesBySource.set(e.source, arr);
+  }
+
+  const touches: FileTouchFact[] = graph.nodes
+    .filter((n) => n.kind === 'touch' && n.source?.filePath === rel)
+    .map((n) => {
+      const edges = edgesBySource.get(n.id) ?? [];
+      const tablesTouched = [
+        ...new Set(edges.map((e) => labelById.get(e.target) ?? e.target)),
+      ];
+      return {
+        ...touchFact(n),
+        direction: edges[0]?.direction,
+        tablesTouched,
+      };
+    });
+
+  return {
+    path: rel,
+    found: touches.length > 0,
+    analyzed_at: graph.generatedAt,
+    touches,
+  };
 }

@@ -70,3 +70,26 @@ test('getTableFacts: unknown table returns found:false but still carries analyze
   assert.equal(t.found, false);
   assert.equal(t.analyzed_at, '2026-05-23T12:00:00.000Z');
 });
+
+import { getFileFacts } from './facts.js';
+
+test('getFileFacts: relative path returns its touches with tables touched', () => {
+  const f = getFileFacts('scripts/seed.py', sampleGraph);
+  assert.equal(f.found, true);
+  assert.equal(f.touches.length, 1);
+  assert.equal(f.touches[0].nodeId, 'touch:python:scripts/seed.py:3:batches');
+  assert.deepEqual(f.touches[0].tablesTouched, ['batches']);
+  assert.equal(f.touches[0].direction, 'write');
+});
+
+test('getFileFacts: absolute path under repoPath is normalized', () => {
+  const f = getFileFacts('/repo/src/ui/Batch.tsx', sampleGraph);
+  assert.equal(f.found, true);
+  assert.equal(f.touches[0].direction, 'read');
+});
+
+test('getFileFacts: unknown file returns found:false with analyzed_at', () => {
+  const f = getFileFacts('nope.ts', sampleGraph);
+  assert.equal(f.found, false);
+  assert.equal(f.analyzed_at, '2026-05-23T12:00:00.000Z');
+});
