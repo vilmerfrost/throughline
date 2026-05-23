@@ -10,7 +10,7 @@ import {
   type DataTypeDef,
   type Statement,
 } from 'pgsql-ast-parser';
-import type { ContractColumn, GraphNode, SourceRef } from '@throughline/core';
+import type { ContractColumn, GraphNode, Relationship, SourceRef } from '@throughline/core';
 
 // Where Supabase keeps migrations. Change this one line to point elsewhere; the
 // directory we scan is the part of the glob before the wildcard.
@@ -39,12 +39,26 @@ const SKIP_DIRS = new Set([
 // real CREATE TABLE statement that defined it. Anything that isn't table DDL is
 // skipped (and counted), never fabricated.
 export async function parseSql(repoPath: string): Promise<GraphNode[]> {
+  return (await parseSchema(repoPath)).nodes;
+}
+
+// FK-A1 (ADDITIVE): one pass over the migrations yielding both the contract nodes
+// and the DECLARED foreign-key relationships between them. `parseSql` is now a
+// thin wrapper that drops the relationships, so every existing caller is
+// unaffected; callers that want the connection layer use this instead.
+export interface Schema {
+  nodes: GraphNode[];
+  relationships: Relationship[];
+}
+
+export async function parseSchema(repoPath: string): Promise<Schema> {
   const files = await findSqlFiles(repoPath);
   // Lexical by filename (Supabase prefixes timestamps, so this is chronological),
   // full path as a stable tie-breaker.
   files.sort((a, b) => cmp(path.basename(a), path.basename(b)) || cmp(a, b));
 
   const tables = new Map<string, TableAcc>();
+  const rawFks: RawFk[] = [];
   const skipReasons = new Map<string, number>();
   let skipped = 0;
   const note = (reason: string) => {
@@ -72,13 +86,14 @@ export async function parseSql(repoPath: string): Promise<GraphNode[]> {
       }
 
       for (const stmt of statements) {
-        const ctx: ParseCtx = { rel, basename, chunk, lineAt, tables, note };
+        const ctx: ParseCtx = { rel, basename, chunk, lineAt, tables, rawFks, note };
         applyStatement(stmt, ctx);
       }
     }
   }
 
   const nodes = [...tables.values()].map(toContractNode);
+  const relationships = resolveRelationships(rawFks, tables);
 
   if (process.env.THROUGHLINE_SQL_DEBUG) {
     const totalColumns = nodes.reduce((sum, n) => sum + (n.columns?.length ?? 0), 0);
@@ -90,6 +105,7 @@ export async function parseSql(repoPath: string): Promise<GraphNode[]> {
           tables: nodes.length,
           tableNames: nodes.map((n) => n.label),
           totalColumns,
+          relationships: relationships.length,
           skipped,
           skipReasons: Object.fromEntries(
             [...skipReasons.entries()].sort((a, b) => b[1] - a[1]),
@@ -101,7 +117,7 @@ export async function parseSql(repoPath: string): Promise<GraphNode[]> {
     );
   }
 
-  return nodes;
+  return { nodes, relationships };
 }
 
 // ---------------------------------------------------------------------------
@@ -114,6 +130,22 @@ interface TableAcc {
   source: SourceRef; // points at the CREATE TABLE statement
   createdInFile: string; // basename of the migration that created it
   extendedIn: Set<string>; // basenames of later migrations that altered its columns
+  // FK-A1: single-column identity constraints, accumulated across migrations.
+  // Used ONLY to infer cardinality: a single-column UNIQUE or PK on the FK column
+  // makes the relationship one-to-one. Composite keys are deliberately NOT
+  // recorded here — a column inside a composite key is not individually unique.
+  uniqueColumns: Set<string>; // columns carrying a single-column UNIQUE or PK
+}
+
+// FK-A1: a declared foreign key as collected during the pass, before targets are
+// resolved. `foreignColumns` may be empty (`REFERENCES target` with no column),
+// in which case it resolves to the target's PK at the end of the pass.
+interface RawFk {
+  fromTable: string;
+  localColumns: string[];
+  toTable: string;
+  foreignColumns: string[];
+  source: SourceRef;
 }
 
 interface ParseCtx {
@@ -122,6 +154,7 @@ interface ParseCtx {
   chunk: Statement_Chunk;
   lineAt: (offset: number) => number;
   tables: Map<string, TableAcc>;
+  rawFks: RawFk[];
   note: (reason: string) => void;
 }
 
@@ -143,19 +176,56 @@ function handleCreate(stmt: CreateTableStatement, ctx: ParseCtx): void {
   if (ctx.tables.has(name)) return;
 
   const pkColumns = collectPrimaryKeyColumns(stmt);
+  const uniqueColumns = new Set<string>();
   const columns = new Map<string, ContractColumn>();
+  const source = sourceFrom(ctx);
+
   for (const def of stmt.columns) {
     if (def.kind !== 'column') continue; // skip `LIKE other_table`
     const col = buildColumn(def, pkColumns);
     columns.set(col.name, col);
+
+    // Column-level identity + FK declarations.
+    for (const c of def.constraints ?? []) {
+      if (c.type === 'unique' || c.type === 'primary key') uniqueColumns.add(col.name);
+      if (c.type === 'reference') {
+        ctx.rawFks.push({
+          fromTable: name,
+          localColumns: [col.name],
+          toTable: c.foreignTable.name,
+          foreignColumns: c.foreignColumns.map((fc) => fc.name),
+          source,
+        });
+      }
+    }
   }
+
+  // Table-level constraints: single-column UNIQUE/PK feed cardinality; FOREIGN KEY
+  // constraints are real declared relationships.
+  for (const constraint of stmt.constraints ?? []) {
+    if (constraint.type === 'unique' || constraint.type === 'primary key') {
+      if (constraint.columns.length === 1) uniqueColumns.add(constraint.columns[0].name);
+    } else if (constraint.type === 'foreign key') {
+      ctx.rawFks.push({
+        fromTable: name,
+        localColumns: constraint.localColumns.map((lc) => lc.name),
+        toTable: constraint.foreignTable.name,
+        foreignColumns: constraint.foreignColumns.map((fc) => fc.name),
+        source,
+      });
+    }
+  }
+
+  // A single-column PK is also a unique column for cardinality purposes.
+  if (pkColumns.size === 1) for (const c of pkColumns) uniqueColumns.add(c);
 
   ctx.tables.set(name, {
     name,
     columns,
-    source: sourceFrom(ctx),
+    source,
     createdInFile: ctx.basename,
     extendedIn: new Set(),
+    uniqueColumns,
   });
 }
 
@@ -163,6 +233,7 @@ function handleAlter(stmt: AlterTableStatement, ctx: ParseCtx): void {
   const name = stmt.table.name;
   const table = ctx.tables.get(name);
   let changedColumns = false;
+  let handledFk = false;
 
   for (const change of stmt.changes) {
     if (change.type === 'add column') {
@@ -170,20 +241,84 @@ function handleAlter(stmt: AlterTableStatement, ctx: ParseCtx): void {
       const col = buildColumn(change.column, new Set());
       table.columns.set(col.name, col);
       changedColumns = true;
+      // An added column can itself carry identity + FK constraints.
+      for (const c of change.column.constraints ?? []) {
+        if (c.type === 'unique' || c.type === 'primary key') table.uniqueColumns.add(col.name);
+        if (c.type === 'reference') {
+          ctx.rawFks.push({
+            fromTable: name,
+            localColumns: [col.name],
+            toTable: c.foreignTable.name,
+            foreignColumns: c.foreignColumns.map((fc) => fc.name),
+            source: sourceFrom(ctx),
+          });
+          handledFk = true;
+        }
+      }
     } else if (change.type === 'drop column') {
       if (!table) continue;
       table.columns.delete(change.column.name);
       changedColumns = true;
+    } else if (change.type === 'add constraint') {
+      const constraint = change.constraint;
+      if (constraint.type === 'foreign key') {
+        ctx.rawFks.push({
+          fromTable: name,
+          localColumns: constraint.localColumns.map((lc) => lc.name),
+          toTable: constraint.foreignTable.name,
+          foreignColumns: constraint.foreignColumns.map((fc) => fc.name),
+          source: sourceFrom(ctx),
+        });
+        handledFk = true;
+      } else if (
+        table &&
+        (constraint.type === 'unique' || constraint.type === 'primary key') &&
+        constraint.columns.length === 1
+      ) {
+        // A later single-column UNIQUE/PK can flip an FK column to one-to-one.
+        table.uniqueColumns.add(constraint.columns[0].name);
+      }
     }
   }
 
   if (changedColumns && table) {
     if (ctx.basename !== table.createdInFile) table.extendedIn.add(ctx.basename);
-  } else {
-    // ALTER with no column add/drop (constraints, RLS enable, owner, rename, ...)
+  } else if (!handledFk) {
+    // ALTER with no column add/drop and no FK we extracted (RLS enable, owner,
+    // rename, check constraints, ...).
     const kinds = stmt.changes.map((c) => c.type).join(', ') || 'no-op';
     ctx.note(`alter table (${kinds})`);
   }
+}
+
+// FK-A1: turn the raw FK declarations into Relationships once every table is
+// known. Pure resolution of facts already collected — NO inference. One
+// Relationship per column pair. Cardinality is one-to-one ONLY for a
+// single-column FK whose column is itself UNIQUE or the PK in the source table;
+// everything else stays many-to-one. (The common parser rejects `REFERENCES
+// target` without a column list, so `foreignColumns` is always populated for FKs
+// we actually extract; the `?? ''` is a defensive guard against arity mismatch,
+// never a fabricated column.)
+function resolveRelationships(rawFks: RawFk[], tables: Map<string, TableAcc>): Relationship[] {
+  const out: Relationship[] = [];
+  for (const fk of rawFks) {
+    const sourceTable = tables.get(fk.fromTable);
+    const singleColumn = fk.localColumns.length === 1;
+
+    for (let i = 0; i < fk.localColumns.length; i++) {
+      const fromColumn = fk.localColumns[i];
+      const isUnique = singleColumn && !!sourceTable && sourceTable.uniqueColumns.has(fromColumn);
+      out.push({
+        fromTable: fk.fromTable,
+        fromColumn,
+        toTable: fk.toTable,
+        toColumn: fk.foreignColumns[i] ?? '',
+        cardinality: isUnique ? 'one-to-one' : 'many-to-one',
+        source: fk.source,
+      });
+    }
+  }
+  return out;
 }
 
 function collectPrimaryKeyColumns(stmt: CreateTableStatement): Set<string> {

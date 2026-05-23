@@ -202,6 +202,34 @@ export interface RootCause {
   evidence?: SourceRef[];
 }
 
+// FK-A1 (ADDITIVE): how many source rows can point at one target row, inferred
+// ONLY from the FK column's real constraints — never overclaimed:
+//
+// many-to-one  the default: an ordinary FK column can repeat, so many source
+//              rows reference one target row.
+// one-to-one   the FK column is itself the source table's PRIMARY KEY or carries
+//              a single-column UNIQUE — so at most one source row per target row.
+//
+// Composite FKs stay 'many-to-one' (we do not claim joint-uniqueness per column).
+export type Cardinality = 'many-to-one' | 'one-to-one';
+
+// FK-A1 (ADDITIVE): a DECLARED foreign-key relationship between two tables, one
+// per column pair, extracted from a real `REFERENCES` in the migrations (inline,
+// table-level, or ALTER ... ADD CONSTRAINT). This is the honest "how is this
+// connected" layer: ONLY declared FKs, each grounded in its migration SourceRef.
+// Semantic / data-lineage links (e.g. "readings feed scores") are NOT statically
+// provable and are NEVER emitted. If a REFERENCES target is not a known table the
+// relationship is still emitted as declared (toTable as written) — not fabricated,
+// not invented — and the verification report flags it as unresolved.
+export interface Relationship {
+  fromTable: string; // the referencing table
+  fromColumn: string; // the referencing (FK) column
+  toTable: string; // the referenced table, exactly as written in REFERENCES
+  toColumn: string; // the referenced column (resolved to the target PK when REFERENCES omits it)
+  cardinality: Cardinality; // inferred from the FK column's real constraints only
+  source: SourceRef; // the migration file:line where this FK is declared
+}
+
 export interface Graph {
   repoPath: string;
   nodes: GraphNode[];
@@ -210,5 +238,8 @@ export interface Graph {
   // RC-a (additive, optional so existing consumers keep compiling): deterministic
   // root-cause rollup of dark/asserted TS touches, ranked biggest-lever-first.
   rootCauses?: RootCause[];
+  // FK-A1 (additive, optional): declared foreign-key relationships between tables,
+  // extracted from the migrations. Connects contract→contract honestly.
+  relationships?: Relationship[];
   generatedAt: string; // ISO 8601
 }

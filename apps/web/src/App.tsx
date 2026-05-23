@@ -13,6 +13,8 @@ import { ContractPicker } from './components/ContractPicker';
 import { FocusFilterBar } from './components/FocusFilterBar';
 import { FocusCanvas } from './components/FocusCanvas';
 import { FocusLegend } from './components/FocusLegend';
+import { RelationshipBand } from './components/RelationshipBand';
+import { buildRelationshipNeighborhood } from './lib/relationships';
 import { RootCausesView } from './components/RootCausesView';
 
 type View = 'focus' | 'roots' | 'map';
@@ -62,6 +64,13 @@ export function App() {
   const summaries = useMemo(() => (graph ? buildContractSummaries(graph) : []), [graph]);
   const focusModel = useMemo(
     () => (graph && focusContractId ? buildFocusModel(graph, focusContractId) : null),
+    [graph, focusContractId],
+  );
+
+  // FK-A2: the focused contract's foreign-key neighborhood (table↔table), shown
+  // as a band beneath the touch canvas. Independent of the verdict/reach filter.
+  const neighborhood = useMemo(
+    () => (graph && focusContractId ? buildRelationshipNeighborhood(graph, focusContractId) : null),
     [graph, focusContractId],
   );
 
@@ -277,6 +286,9 @@ export function App() {
                 </div>
               )}
             </div>
+            {neighborhood && (
+              <RelationshipBand neighborhood={neighborhood} onSelectContract={selectContract} />
+            )}
             <FocusLegend />
           </div>
 
