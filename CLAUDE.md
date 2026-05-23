@@ -181,6 +181,7 @@ throughline/
 | `packages/core/src/types.ts` | The entire data model + design intent in doc-comments. Single source of truth for the contract/touch/trust/drift/RootCause/Relationship shapes. **Read before changing the model.** |
 | `packages/analyzer/src/index.ts` | Express server + endpoints (`/health` `/analyze` `/explain` `/fix-prompt`) + hardcoded default-repo resolution |
 | `packages/analyzer/src/buildGraph.ts` | `buildGraph(repoPath)` — composes all analyzer stages into a `Graph`. Extracted from `index.ts` so the MCP server can call it in-process without booting Express. |
+| `packages/mcp/README.md` | MCP tool reference + **how to connect an agent** (Claude Code `claude mcp add`, Claude Desktop / `.mcp.json`, env/argv repo selection) |
 | `packages/mcp/src/index.ts` + `server.ts` + `facts.ts` | MCP server entry + tool registration + the functions that turn a `Graph` into agent-readable facts (incl. `checkWrite`) |
 | `packages/analyzer/src/schema/compareFields.ts` | `compareWriteFields` — the ONE pure field-names-vs-schema comparison shared by the Rust write analyzer and MCP `check_write` (insert/update rules + `hasDefault`); exported via `@throughline/analyzer/schema/compareFields` |
 | `packages/analyzer/src/sql/parseSql.ts` | `parseSchema` — SQL contract nodes (via `pgsql-ast-parser`) + FK-A1 declared relationships |
