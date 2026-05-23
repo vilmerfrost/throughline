@@ -1,8 +1,8 @@
 #!/usr/bin/env tsx
-import { buildGraph } from '@throughline/analyzer/buildGraph';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { GraphCache } from './graphCache.js';
+import { createServer } from './server.js';
 
-// repoPath comes from argv[2] or THROUGHLINE_REPO env; defaults to the
-// verification repo so a bare launch is still useful.
 function resolveRepoPath(): string {
   return (
     process.argv[2] ||
@@ -13,12 +13,18 @@ function resolveRepoPath(): string {
 
 async function main() {
   const repoPath = resolveRepoPath();
+  // Log to stderr ONLY — stdout is the MCP protocol channel.
   console.error(`[throughline-mcp] analyzing ${repoPath} ...`);
-  const graph = await buildGraph(repoPath);
+  const cache = new GraphCache(repoPath);
+  await cache.init();
   console.error(
-    `[throughline-mcp] graph built: ${graph.nodes.length} nodes, ` +
-      `${graph.edges.length} edges, analyzed_at=${graph.generatedAt}`,
+    `[throughline-mcp] ready: ${cache.graph.nodes.length} nodes, analyzed_at=${cache.graph.generatedAt}`,
   );
+
+  const server = createServer(cache);
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error('[throughline-mcp] connected on stdio');
 }
 
 main().catch((error) => {
