@@ -64,21 +64,63 @@ async function main() {
       ? pass(`${label} carries analyzed_at`)
       : fail(`${label} missing analyzed_at`);
 
-  for (const name of ['audit_log', 'batches', 'inspection_packs']) {
+  // These tables MUST exist in Batch-Guard.ai-2. A missing expected table is a
+  // hard FAIL — never a silent skip. Skipping is the test-harness version of the
+  // exact false-green this tool exists to prevent.
+  const requiredTables = ['events_log', 'batches', 'inspection_packs'];
+  const tables: Record<string, any> = {};
+  for (const name of requiredTables) {
     const r = structured(await client.callTool({ name: 'get_table', arguments: { name } }));
-    if (r.found) {
-      carriesAnalyzedAt(r, `get_table(${name})`);
-      r.columns.length > 0 ? pass(`get_table(${name}) has columns`) : fail(`get_table(${name}) no columns`);
-      const reachCols = r.columns.filter((c: any) => c.reach);
-      pass(`get_table(${name}) reach on ${reachCols.length}/${r.columns.length} columns`);
-      pass(`get_table(${name}) fkNeighbors=${r.fkNeighbors.length}, writers=${r.touches.writers.length}, readers=${r.touches.readers.length}`);
-      const darkOrAsserted = [...r.touches.writers, ...r.touches.readers].filter(
-        (t: any) => t.trust === 'dark' || t.trust === 'asserted',
-      );
-      darkOrAsserted.every((t: any) => t.reasonDescription && t.source)
-        ? pass(`get_table(${name}) every dark/asserted touch carries reason + source`)
-        : fail(`get_table(${name}) a dark/asserted touch lacks reason or source`);
+    tables[name] = r;
+    if (!r.found) {
+      fail(`get_table(${name}) expected table is ABSENT (found:false) — regression or wrong name`);
+      continue;
     }
+    carriesAnalyzedAt(r, `get_table(${name})`);
+    r.columns.length > 0 ? pass(`get_table(${name}) has columns`) : fail(`get_table(${name}) no columns`);
+    const reachCols = r.columns.filter((c: any) => c.reach);
+    pass(`get_table(${name}) reach on ${reachCols.length}/${r.columns.length} columns`);
+    pass(`get_table(${name}) fkNeighbors=${r.fkNeighbors.length}, writers=${r.touches.writers.length}, readers=${r.touches.readers.length}`);
+    const darkOrAsserted = [...r.touches.writers, ...r.touches.readers].filter(
+      (t: any) => t.trust === 'dark' || t.trust === 'asserted',
+    );
+    darkOrAsserted.every((t: any) => t.reasonDescription && t.source)
+      ? pass(`get_table(${name}) every dark/asserted touch carries reason + source`)
+      : fail(`get_table(${name}) a dark/asserted touch lacks reason or source`);
+  }
+
+  // Named case 1 — events_log: the Rust insert writes an unknown key `previous_hash`
+  // not in the schema. This must surface as a drift finding grounded in a real
+  // SourceRef (it is NOT folded into any verdict; it stays a free-form-payload mismatch).
+  {
+    const r = tables['events_log'];
+    const hashDrift = (r?.drift ?? []).find(
+      (d: any) =>
+        /previous_hash/.test(d.message) &&
+        /unknown key|not in the schema/i.test(d.message),
+    );
+    hashDrift &&
+    typeof hashDrift.source?.filePath === 'string' &&
+    typeof hashDrift.source?.startLine === 'number'
+      ? pass(
+          `events_log: previous_hash unknown-key mismatch present @ ${hashDrift.source.filePath}:${hashDrift.source.startLine}`,
+        )
+      : fail('events_log: previous_hash unknown-key mismatch drift (with SourceRef) NOT found');
+  }
+
+  // Named case 2 — batches: the BatchInsertPayload Rust write resolves field-by-field
+  // against the schema and returns schemaMatch 'aligned' at deep-parsed scope (Stage 1a).
+  {
+    const r = tables['batches'];
+    const alignedRust = (r?.touches?.writers ?? []).find(
+      (w: any) =>
+        w.schemaMatch === 'aligned' && w.language === 'rust' && w.scope?.depth === 'deep',
+    );
+    alignedRust && typeof alignedRust.source?.filePath === 'string'
+      ? pass(
+          `batches: BatchInsertPayload aligned deep-parsed Rust write present @ ${alignedRust.source.filePath}:${alignedRust.source.startLine} (schemaMatch=aligned)`,
+        )
+      : fail('batches: no aligned deep-parsed Rust write (BatchInsertPayload, schemaMatch=aligned) found');
   }
 
   const rc = structured(await client.callTool({ name: 'get_root_causes', arguments: {} }));
@@ -87,9 +129,17 @@ async function main() {
     ? pass(`get_root_causes returned ${rc.rootCauses.length} levers; top affectedCount=${rc.rootCauses[0].affectedCount}`)
     : fail('get_root_causes returned no levers');
   const paramLever = rc.rootCauses.find((l: any) => l.origin?.shape === 'parameter');
-  paramLever
-    ? pass(`parameter lever present: affectedCount=${paramLever.affectedCount}`)
-    : console.error('note: no parameter-shape lever in this repo run');
+  if (!paramLever) {
+    fail('parameter-shape root-cause lever (query.ts) is ABSENT');
+  } else {
+    paramLever.affectedCount === 20
+      ? pass(`query.ts parameter lever present: affectedCount=20`)
+      : fail(`parameter lever affectedCount=${paramLever.affectedCount}, expected 20`);
+    const ev = paramLever.evidence?.[0]?.filePath ?? '';
+    /query\.ts/.test(ev)
+      ? pass(`parameter lever grounded in query.ts (${ev})`)
+      : fail(`parameter lever evidence not grounded in query.ts: "${ev}"`);
+  }
 
   const evidencePath = paramLever?.evidence?.[0]?.filePath;
   if (evidencePath) {
