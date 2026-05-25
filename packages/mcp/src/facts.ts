@@ -11,10 +11,15 @@ import {
   type ColumnReach,
   type Cardinality,
   type DriftFinding,
+  type DriftKind,
+  type DriftSummary,
   type EdgeDirection,
+  type Fixability,
   type RootCause,
   type SourceScope,
   type UnresolvedShape,
+  type WriterLifecycle,
+  type AnalyzerDepth,
 } from '@throughline/core';
 import { compareWriteFields } from '@throughline/analyzer/schema/compareFields';
 
@@ -27,7 +32,13 @@ export interface Scope {
 // Deep when ts-morph resolved it (typescript) or a Rust write was deep-parsed
 // against its struct (schemaMatch present). Everything else is shallow grep.
 // Contracts (SQL) are parsed schema -> deep.
+//
+// Prefer the per-node `analysisDepth` when the analyzer set it (Slice 2 — the
+// honest, per-touch axis). Falling back to language/schemaMatch keeps older
+// fixtures and external consumers compiling.
 export function depthForNode(node: GraphNode): 'deep' | 'shallow' {
+  if (node.analysisDepth === 'deep' || node.analysisDepth === 'contract') return 'deep';
+  if (node.analysisDepth === 'shallow' || node.analysisDepth === 'analyzer_limit') return 'shallow';
   if (node.schemaMatch) return 'deep';
   if (node.kind === 'contract') return 'deep';
   const lang = node.language as Language | undefined;
@@ -52,6 +63,12 @@ export interface TouchFact {
   confidence: Confidence;
   scope: Scope;
   sourceScope?: SourceScope;
+  // Additive: per-touch analyzer depth + writer lifecycle. Strictly separate
+  // from `trust` — consumers can group "deep but still dark" vs "shallow
+  // dark", and "runtime app write" vs "migration backfill", without re-deriving
+  // either from the source path.
+  analysisDepth?: AnalyzerDepth;
+  lifecycle?: WriterLifecycle;
   source?: SourceRef;
 }
 
@@ -69,6 +86,8 @@ export function touchFact(node: GraphNode): TouchFact {
     confidence: confidenceForNode(node),
     scope: { level: 'table', depth: depthForNode(node) },
     sourceScope: node.sourceScope,
+    analysisDepth: node.analysisDepth,
+    lifecycle: node.lifecycle,
     source: node.source,
   };
 }
@@ -178,6 +197,11 @@ export interface DriftFact {
   scopeBreakdown?: Partial<Record<SourceScope, number>>;
   productionImpact?: boolean;
   testOnly?: boolean;
+  // Additive (Slice 1 — drift taxonomy). Optional so older fixtures and
+  // pre-analyzer drift findings remain valid.
+  kind?: DriftKind;
+  fixability?: Fixability;
+  recommendedAction?: string;
 }
 
 export interface TableFacts {
@@ -237,16 +261,38 @@ export function getTableFacts(name: string, graph: Graph, filter: FactFilter = {
 
   base.drift = graph.drift
     .filter((d) => d.contractId === contract.id)
-    .map((d) => ({
-      message: d.message,
-      severity: d.severity,
-      source: d.source,
-      scopeBreakdown: d.scopeBreakdown,
-      productionImpact: d.productionImpact,
-      testOnly: d.testOnly,
-    }));
+    .filter((d) => driftMatchesFilter(d, filter))
+    .map(toDriftFact);
 
   return base;
+}
+
+function toDriftFact(d: DriftFinding): DriftFact {
+  return {
+    message: d.message,
+    severity: d.severity,
+    source: d.source,
+    scopeBreakdown: d.scopeBreakdown,
+    productionImpact: d.productionImpact,
+    testOnly: d.testOnly,
+    kind: d.kind,
+    fixability: d.fixability,
+    recommendedAction: d.recommendedAction,
+  };
+}
+
+// Exposed for `get_drift_summary`-style tools — pure passthrough of the graph's
+// own summary (never recomputed; the analyzer is the source of truth).
+export interface DriftSummaryFacts {
+  analyzed_at: string;
+  summary: DriftSummary | null;
+}
+
+export function getDriftSummary(graph: Graph): DriftSummaryFacts {
+  return {
+    analyzed_at: graph.generatedAt,
+    summary: graph.driftSummary ?? null,
+  };
 }
 
 // --- file facts -----------------------------------------------------------
@@ -428,6 +474,17 @@ function matchesFilter(node: GraphNode, filter: FactFilter): boolean {
   const scope = filter.scope ?? 'all';
   if (scope === 'all') return true;
   return (node.sourceScope ?? 'unknown') === scope;
+}
+
+function driftMatchesFilter(finding: DriftFinding, filter: FactFilter): boolean {
+  const scopes = finding.scopeBreakdown;
+  if (filter.includeTests === false && scopes && Object.keys(scopes).length === 1 && (scopes.test ?? 0) > 0) {
+    return false;
+  }
+  const scope = filter.scope ?? 'all';
+  if (scope === 'all') return true;
+  if (!scopes) return true;
+  return (scopes[scope] ?? 0) > 0;
 }
 
 function groupTouchesByScope(

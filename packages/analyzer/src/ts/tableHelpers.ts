@@ -34,12 +34,12 @@ export function collectTableHelperAliases(
   knownTables: Set<string>,
   isTypedClient: (fromCall: CallExpression) => boolean,
   resolveTableName: (arg: Node | undefined) => { name?: string; bypass: boolean },
-): Map<string, TableHelperAlias> {
-  const aliases = new Map<string, TableHelperAlias>();
+): TableHelperAlias[] {
+  const aliases: TableHelperAlias[] = [];
   for (const sf of project.getSourceFiles()) {
     for (const fn of sf.getFunctions()) {
       const info = tableHelperFromFunction(fn, repoPath, knownTables, isTypedClient, resolveTableName);
-      if (info) aliases.set(info.functionName, info);
+      if (info) aliases.push(info);
     }
   }
   return aliases;
@@ -47,7 +47,7 @@ export function collectTableHelperAliases(
 
 export function findTableAccesses(
   sf: SourceFile,
-  aliases: Map<string, TableHelperAlias>,
+  aliases: readonly TableHelperAlias[],
   resolveTableName: (arg: Node | undefined) => { name?: string; bypass: boolean },
 ): TableAccess[] {
   const out: TableAccess[] = [];
@@ -68,10 +68,7 @@ export function findTableAccesses(
   return out;
 }
 
-function resolveAlias(expr: Identifier, aliases: Map<string, TableHelperAlias>): TableHelperAlias | undefined {
-  const direct = aliases.get(expr.getText());
-  if (direct) return direct;
-
+function resolveAlias(expr: Identifier, aliases: readonly TableHelperAlias[]): TableHelperAlias | undefined {
   const decls = symbolDeclarations(expr.getSymbol());
   for (const alias of aliases.values()) {
     if (

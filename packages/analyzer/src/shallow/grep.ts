@@ -1,8 +1,9 @@
 import { readdir, readFile } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
-import type { EdgeDirection, GraphEdge, GraphNode, Language, SourceRef } from '@throughline/core';
+import type { EdgeDirection, GraphEdge, GraphNode, Language, SourceRef, WriterLifecycle } from '@throughline/core';
 import { classifySourceScope } from '../sourceScope.js';
+import { classifyWriterLifecycle } from '../lifecycle.js';
 
 // Shallow, line/regex-based detection of Python and Rust touches on the DB
 // contracts. NO AST parsing — we accept approximate detection but never
@@ -103,6 +104,8 @@ export async function grepShallow(
         endLine: c.line,
         snippet: lines[c.line - 1] ?? '',
       };
+      const sourceScope = classifySourceScope(rel);
+      const lifecycle: WriterLifecycle | undefined = classifyWriterLifecycle(rel, c.direction, sourceScope);
       nodes.push({
         id,
         kind: 'touch',
@@ -110,7 +113,9 @@ export async function grepShallow(
         label: `${c.direction} ${c.table}`,
         trust: 'dark',
         trustReason: lang === 'python' ? 'shallow-grep-python' : 'shallow-grep-rust',
-        sourceScope: classifySourceScope(rel),
+        sourceScope,
+        analysisDepth: 'shallow',
+        ...(lifecycle ? { lifecycle } : {}),
         source,
         notes: buildNotes(lang, c.direction, c.table),
       });

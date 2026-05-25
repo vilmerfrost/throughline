@@ -1,12 +1,16 @@
 import type {
   DriftFinding,
+  DriftKind,
+  DriftSummary,
   EdgeDirection,
+  Fixability,
   GraphEdge,
   GraphNode,
   Language,
   SourceRef,
   SourceScope,
   Trust,
+  WriterLifecycle,
 } from '@throughline/core';
 
 // Find STRUCTURAL divergence RISK across the contracts, grounded entirely in the
@@ -27,7 +31,61 @@ interface Touch {
   direction: EdgeDirection;
   trust: Trust;
   sourceScope?: SourceScope;
+  lifecycle?: WriterLifecycle;
   source?: SourceRef;
+}
+
+// One canonical recommended action per drift kind. These are short, grounded
+// hints — never an LLM call, never invented. Kept in this single map so adding
+// a new DriftKind forces us to pick the action up front.
+const RECOMMENDED_ACTION: Record<DriftKind, string> = {
+  'cross-language-blind-boundary':
+    'Pick ONE source of truth for the payload shape (shared schema type, generated bindings, or a typed wrapper) so the schema change shows up at every boundary.',
+  'multi-writer-no-shared-type':
+    'Share a single schema type (or generated bindings) across the writing languages so changes are forced through every writer.',
+  'all-dark-writes':
+    'Tighten the writer client so the schema type is carried (e.g. `SupabaseClient<Database>` in TS, `#[derive(Serialize)]` in Rust, typed payloads in Python).',
+  'asymmetry-no-reader':
+    'Confirm the table is intentionally write-only or trace the reader path (raw SQL, view, unscanned service) so it is no longer hidden from Throughline.',
+  'asymmetry-no-writer':
+    'Confirm the table is populated outside scanned code (seed, view, external service) or wire its writer into the analyzed surface.',
+  'untouched-contract':
+    'Confirm the table is still in use (or drop it) — no scanned code reads or writes it.',
+  'rust-missing-required-column':
+    'Add the missing NOT-NULL column to the Rust payload struct (or give the column a SQL DEFAULT).',
+  'rust-conditional-serialization':
+    'Confirm the Rust field is always serialized before insert, or give the database column a DEFAULT if omission is valid.',
+  'rust-unknown-key':
+    'Rename or remove the unknown key in the Rust payload — it is not a column on this table.',
+  'python-missing-required-column':
+    'Add the missing NOT-NULL column to the Python payload dict (or give the column a SQL DEFAULT).',
+  'python-unknown-key':
+    'Rename or remove the unknown key in the Python payload — it is not a column on this table.',
+};
+
+const FIXABILITY: Record<DriftKind, Fixability> = {
+  'cross-language-blind-boundary': 'requires-investigation',
+  'multi-writer-no-shared-type': 'requires-investigation',
+  'all-dark-writes': 'actionable',
+  'asymmetry-no-reader': 'informational',
+  'asymmetry-no-writer': 'informational',
+  'untouched-contract': 'informational',
+  'rust-missing-required-column': 'actionable',
+  'rust-conditional-serialization': 'requires-investigation',
+  'rust-unknown-key': 'actionable',
+  'python-missing-required-column': 'actionable',
+  'python-unknown-key': 'actionable',
+};
+
+// Public: classify a finding produced outside `detectDrift` (e.g. Rust Stage
+// 1a + Python payload tracing) without forcing the analyzer to know the action.
+// Pure lookup — never invents a category that isn't in the taxonomy.
+export function fixabilityFor(kind: DriftKind): Fixability {
+  return FIXABILITY[kind];
+}
+
+export function recommendedActionFor(kind: DriftKind): string {
+  return RECOMMENDED_ACTION[kind];
 }
 
 export function detectDrift(
@@ -79,6 +137,7 @@ function groupTouches(touches: GraphNode[], edges: GraphEdge[]): Map<string, Tou
       direction: edge.direction,
       trust: node.trust,
       sourceScope: node.sourceScope,
+      lifecycle: node.lifecycle,
       source: node.source,
     });
     byContract.set(edge.target, list);
@@ -88,7 +147,12 @@ function groupTouches(touches: GraphNode[], edges: GraphEdge[]): Map<string, Tou
 
 function evaluateContract(contract: GraphNode, touches: Touch[]): DriftFinding | null {
   const table = contract.label;
-  const writes = touches.filter((t) => t.direction === 'write');
+  // Cross-language risk lives in RUNTIME (app) writers. Migration/seed/trigger
+  // touches are real evidence but a different actor — they don't make an app
+  // writer's blindness "fine". We filter them out for the risk classes, but
+  // keep them counted in `scopeBreakdown` so the consumer can still see them.
+  const allWrites = touches.filter((t) => t.direction === 'write');
+  const writes = allWrites.filter((t) => (t.lifecycle ?? 'runtime') === 'runtime');
   const reads = touches.filter((t) => t.direction === 'read');
   const writeLangs = langSet(writes);
   const readLangs = langSet(reads);
@@ -114,6 +178,8 @@ function evaluateContract(contract: GraphNode, touches: Touch[]): DriftFinding |
           `${readersText}. Writers and readers are aligned by hand — a schema change won't be ` +
           `caught at any of these boundaries.`,
         shallowDarkWrites[0]?.source,
+        scopeBreakdown([...shallowDarkWrites, ...differingReaders]),
+        'cross-language-blind-boundary',
       );
     }
   }
@@ -126,44 +192,49 @@ function evaluateContract(contract: GraphNode, touches: Touch[]): DriftFinding |
       `\`${table}\` is written by ${joinLangs(writeLangs)} independently — no shared schema ` +
         `type, so each writer keeps its payload aligned with the schema by hand.`,
       writes[0]?.source,
+      scopeBreakdown(writes),
+      'multi-writer-no-shared-type',
     );
   }
 
-  // 3. ALL-DARK WRITES — every write is type-blind.
+  // 3. ALL-DARK WRITES — every runtime write is type-blind.
   if (writes.length > 0 && writes.every((w) => w.trust === 'dark')) {
     const scopes = scopeBreakdown(writes);
     const testOnly = isTestOnly(scopes);
-    const productionImpact = hasProduction(scopes);
     return finding(
       contract,
       'info',
       testOnly
         ? `Test-only direct writes to \`${table}\` are type-blind — no production write is directly traced.`
-        : `Every directly traced write to \`${table}\` is type-blind — no writer carries the schema type.`,
+        : `Every directly traced runtime write to \`${table}\` is type-blind — no writer carries the schema type.`,
       writes[0]?.source,
       scopes,
-      productionImpact,
-      testOnly,
+      'all-dark-writes',
     );
   }
 
-  // 4. ASYMMETRY (hedged, info).
-  if (writes.length > 0 && reads.length === 0) {
+  // 4. ASYMMETRY (hedged, info). Lifecycle-aware: a table that only has
+  //    migration/seed/trigger writers is not "written by runtime app code".
+  if (allWrites.length > 0 && reads.length === 0) {
     return finding(
       contract,
       'info',
-      `\`${table}\` is written by ${joinLangs(writeLangs)} but has no detected reader ` +
+      `\`${table}\` is written by ${joinLangs(langSet(allWrites))} but has no detected reader ` +
         `(may be consumed via a SQL view or a path Throughline doesn't scan).`,
-      writes[0]?.source,
+      allWrites[0]?.source,
+      scopeBreakdown(allWrites),
+      'asymmetry-no-reader',
     );
   }
-  if (reads.length > 0 && writes.length === 0) {
+  if (reads.length > 0 && allWrites.length === 0) {
     return finding(
       contract,
       'info',
       `\`${table}\` is read by ${joinLangs(readLangs)} but has no detected writer ` +
         `(may be populated via a SQL view, seed, or a path Throughline doesn't scan).`,
       reads[0]?.source,
+      scopeBreakdown(reads),
+      'asymmetry-no-writer',
     );
   }
 
@@ -175,6 +246,8 @@ function evaluateContract(contract: GraphNode, touches: Touch[]): DriftFinding |
       `\`${table}\` is defined in SQL but no detected code touches it ` +
         `(may be used via views, raw SQL, seeds, or unscanned services).`,
       contract.source,
+      undefined,
+      'untouched-contract',
     );
   }
 
@@ -189,20 +262,46 @@ function finding(
   severity: DriftFinding['severity'],
   message: string,
   source: SourceRef | undefined,
-  scopes?: Partial<Record<SourceScope, number>>,
-  productionImpact?: boolean,
-  testOnly?: boolean,
+  scopes: Partial<Record<SourceScope, number>> | undefined,
+  kind: DriftKind,
 ): DriftFinding | null {
   if (!source) return null;
+  const productionImpact = scopes ? hasProduction(scopes) : undefined;
+  const testOnly = scopes ? isTestOnly(scopes) : undefined;
   return {
     contractId: contract.id,
     message,
     severity,
     source,
+    kind,
+    fixability: FIXABILITY[kind],
+    recommendedAction: RECOMMENDED_ACTION[kind],
     ...(scopes ? { scopeBreakdown: scopes } : {}),
     ...(productionImpact !== undefined ? { productionImpact } : {}),
     ...(testOnly !== undefined ? { testOnly } : {}),
   };
+}
+
+// Pure rollup over the drift list. Counts only — never re-classifies.
+export function summarizeDrift(findings: DriftFinding[]): DriftSummary {
+  const summary: DriftSummary = {
+    total: findings.length,
+    bySeverity: {},
+    byKind: {},
+    byFixability: {},
+    productionImpact: 0,
+    testOnly: 0,
+  };
+  for (const f of findings) {
+    summary.bySeverity[f.severity] = (summary.bySeverity[f.severity] ?? 0) + 1;
+    if (f.kind) summary.byKind[f.kind] = (summary.byKind[f.kind] ?? 0) + 1;
+    if (f.fixability) {
+      summary.byFixability[f.fixability] = (summary.byFixability[f.fixability] ?? 0) + 1;
+    }
+    if (f.productionImpact) summary.productionImpact += 1;
+    if (f.testOnly) summary.testOnly += 1;
+  }
+  return summary;
 }
 
 function langSet(touches: Touch[]): Set<Language> {

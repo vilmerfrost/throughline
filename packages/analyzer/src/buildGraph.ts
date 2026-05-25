@@ -1,10 +1,12 @@
 import type { Graph } from '@throughline/core';
 import { parseSchema } from './sql/parseSql.js';
+import { sqlWriters } from './sql/writers.js';
 import { loadProject, parseTs } from './ts/parseTs.js';
 import { computeColumnUsage } from './ts/columnUsage.js';
 import { grepShallow } from './shallow/grep.js';
 import { analyzeRustWrites, attachSchemaMatch } from './rust/schemaMatch.js';
-import { detectDrift } from './drift/detect.js';
+import { analyzePythonWrites, attachPythonSchemaMatch } from './python/schemaMatch.js';
+import { detectDrift, summarizeDrift } from './drift/detect.js';
 
 // Compose the graph from the analyzers. Edges connect outputs from different
 // analyzers: SQL contracts on one side, code touches on the other.
@@ -18,12 +20,13 @@ export async function buildGraph(repoPath: string): Promise<Graph> {
   // touches; computeColumnUsage derives per-column read verdicts) so type
   // resolution is paid for once.
   const project = loadProject(repoPath);
-  const [tsResult, shallowResult] = await Promise.all([
+  const [tsResult, shallowResult, sqlWriterResult] = await Promise.all([
     parseTs(repoPath, sqlNodes, project),
     grepShallow(repoPath, sqlNodes),
+    sqlWriters(repoPath, sqlNodes),
   ]);
-  const touches = [...tsResult.nodes, ...shallowResult.nodes];
-  const edges = [...tsResult.edges, ...shallowResult.edges];
+  const touches = [...tsResult.nodes, ...shallowResult.nodes, ...sqlWriterResult.nodes];
+  const edges = [...tsResult.edges, ...shallowResult.edges, ...sqlWriterResult.edges];
 
   // Additive, non-breaking: attach column-level read usage to contract nodes.
   const columnUsage = computeColumnUsage(repoPath, sqlNodes, project, sqlViewReads);
@@ -39,13 +42,23 @@ export async function buildGraph(repoPath: string): Promise<Graph> {
   attachSchemaMatch(shallowResult.nodes, rustWrites);
   const rustDrift = rustWrites.flatMap((w) => w.drift);
 
+  // Python supabase-py payload tracing (additive — same shape as Stage 1a Rust):
+  // resolve `.table('x').insert/upsert/update(payload).execute()` payloads to
+  // local dict literals or simple variables, compare against the schema, stamp
+  // `schemaMatch` on the still-dark Python write touches, emit grounded drift.
+  const pythonWrites = await analyzePythonWrites(repoPath, sqlNodes);
+  attachPythonSchemaMatch(shallowResult.nodes, pythonWrites);
+  const pythonDrift = pythonWrites.flatMap((w) => w.drift);
+
   const nodes = [...sqlNodes, ...touches];
 
+  const drift = [...detectDrift(sqlNodes, touches, edges), ...rustDrift, ...pythonDrift];
   return {
     repoPath,
     nodes,
     edges,
-    drift: [...detectDrift(sqlNodes, touches, edges), ...rustDrift],
+    drift,
+    driftSummary: summarizeDrift(drift),
     // RC-a (additive): deterministic root-cause rollup of the dark/asserted TS
     // touches, ranked biggest-lever-first. Computed by the TS analyzer; nothing
     // else touched.

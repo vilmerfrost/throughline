@@ -117,6 +117,51 @@ is verified by a real-repo report script, not just unit tests (see Conventions).
   shared field comparison (`schema/compareFields.ts` `compareWriteFields`) so the
   Rust write analyzer and `check_write` can never disagree. (`packages/mcp/`)
 
+- **Drift taxonomy (Slice 1)** — every `DriftFinding` now carries `kind`
+ (`cross-language-blind-boundary`, `multi-writer-no-shared-type`,
+ `all-dark-writes`, `asymmetry-no-reader`, `asymmetry-no-writer`,
+`untouched-contract`, `rust-missing-required-column`,
+`rust-conditional-serialization`, `rust-unknown-key`,
+`python-missing-required-column`, `python-unknown-key`), `fixability`
+ (`actionable` / `requires-investigation` / `informational`) and a grounded
+ `recommendedAction` string. `Graph.driftSummary` is the pure rollup of these
+ categories with severity + production/test counts. All fields are
+ additive/optional. (`drift/detect.ts` `detectDrift` + `summarizeDrift`,
+ `fixabilityFor`, `recommendedActionFor`)
+- **Per-touch analyzer axis (Slice 2)** — every touch carries an additive
+ `analysisDepth` (`deep`/`shallow`/`contract`/`analyzer_limit`) so consumers
+ can distinguish "shallow grep dark" from "deep-parsed but the body was
+ unresolvable" (`analyzer_limit`). Trust stays sacred and separate. Writes
+ also carry an additive `lifecycle` (`runtime` / `migration` / `seed` /
+ `trigger`) — see Slice 3.
+- **SQL writer lifecycle (Slice 3)** — `sql/writers.ts` scans
+ `supabase/migrations/**/*.sql` and `supabase/seed*.sql` for top-level DML
+ (`INSERT INTO` / `UPDATE` / `DELETE FROM`) and labels each as a touch with
+ `lifecycle: 'migration'` (or `'seed'`). Statements inside a `$tag$ … $tag$`
+ function body (Postgres triggers / RPC functions) are labelled
+`lifecycle: 'trigger'`. SQL line and block comments are masked before DML
+matching so commented examples never emit writer facts. SQL writer touches use
+`trustReason: 'shallow-grep-sql'`. The drift detector filters out non-runtime
+writers from the all-dark / cross-language risk categories, so a migration
+backfill is no longer counted as an app-runtime writer.
+- **Python supabase-py payload tracing (Slice 4)** — `python/schemaMatch.ts`
+ deep-parses `.table('x').insert/upsert/update(payload).execute()` and resolves
+ the payload to a literal `{...}`, a `dict(...)` call, kwargs, a list of
+ literal dicts, or a single local `payload = {...}` variable. Resolved
+ payloads are compared against the schema via the shared
+ `compareWriteFields`; mismatches emit grounded
+ `python-missing-required-column` / `python-unknown-key` drift findings and
+ stamp `schemaMatch` onto the still-dark Python touch (trust stays
+ `dark`/`shallow-grep-python`).
+- **Rust serde refinements (Slice 5)** — `#[serde(skip_serializing_if = "…")]`
+ fields are now tracked as `conditionalKeys` on the resolved body. A NOT-NULL-
+ no-default column whose only struct field is conditional emits an info-level
+`"may conditionally omit"` drift finding with kind
+`rust-conditional-serialization` (fixability `requires-investigation`) without
+falsely promoting the verdict to `mismatch` (the field IS declared).
+Aligned/mismatch Rust writes also upgrade their touch's `analysisDepth` to
+`deep`; unresolved bodies become `analyzer_limit`.
+
 **In progress / next:** B2 (reach axis in the UI). Uncommitted work currently on
 disk touches `RelationshipBand`, `lib/relationships.ts`, and FK tests.
 
@@ -196,7 +241,10 @@ throughline/
 | --- | --- |
 | `packages/core/src/types.ts` | The entire data model + design intent in doc-comments. Single source of truth for the contract/touch/trust/drift/RootCause/Relationship shapes. **Read before changing the model.** |
 | `packages/analyzer/src/index.ts` | Express server + endpoints (`/health` `/analyze` `/explain` `/fix-prompt`) + hardcoded default-repo resolution |
-| `packages/analyzer/src/buildGraph.ts` | `buildGraph(repoPath)` — composes all analyzer stages into a `Graph`. Extracted from `index.ts` so the MCP server can call it in-process without booting Express. |
+| `packages/analyzer/src/buildGraph.ts` | `buildGraph(repoPath)` — composes all analyzer stages into a `Graph`, including SQL writers (Slice 3), Python payload tracing (Slice 4), and `driftSummary` (Slice 1). Extracted from `index.ts` so the MCP server can call it in-process without booting Express. |
+| `packages/analyzer/src/lifecycle.ts` | `classifyWriterLifecycle(filePath, direction, scope)` — pure path-based classifier emitting `WriterLifecycle` for write touches (`runtime`/`migration`/`seed`/`trigger`). Reads carry no lifecycle. |
+| `packages/analyzer/src/sql/writers.ts` | Slice 3 — scans `supabase/migrations/**/*.sql` and `supabase/seed*.sql` for DML and emits one `lifecycle: 'migration' | 'seed' | 'trigger'` touch per real statement, grounded in its line+snippet. |
+| `packages/analyzer/src/python/parsePython.ts` + `schemaMatch.ts` | Slice 4 — tree-sitter Python parser + deep payload tracing for supabase-py `.insert/.update/.upsert(payload).execute()`. Same honesty bar as Rust Stage 1a: aligned/mismatch only when the payload was REALLY resolved; anything dynamic stays `dark`. |
 | `packages/mcp/README.md` | MCP tool reference + **how to connect an agent** (Claude Code `claude mcp add`, Claude Desktop / `.mcp.json`, env/argv repo selection) |
 | `packages/mcp/src/index.ts` + `server.ts` + `facts.ts` | MCP server entry + tool registration + the functions that turn a `Graph` into agent-readable facts (incl. `checkWrite`) |
 | `packages/analyzer/src/schema/compareFields.ts` | `compareWriteFields` — the ONE pure field-names-vs-schema comparison shared by the Rust write analyzer and MCP `check_write` (insert/update rules + `hasDefault`); exported via `@throughline/analyzer/schema/compareFields` |
@@ -224,14 +272,26 @@ throughline/
 
 All in `packages/core/src/types.ts`. The load-bearing types:
 
-- `Graph` — `{ repoPath, nodes, edges, drift, rootCauses?, relationships?, sqlViewReads?, helperAliases?, generatedAt }`
+- `Graph` — `{ repoPath, nodes, edges, drift, driftSummary?, rootCauses?, relationships?, sqlViewReads?, helperAliases?, generatedAt }`
 - `GraphNode` — `kind: 'contract'|'touch'|'boundary'`; contracts carry `columns` +
-  `columnUsage`; touches carry `trust` + `trustReason` + `schemaMatch?` +
-  `sourceScope?` + `source`
+ `columnUsage`; touches carry `trust` + `trustReason` + `schemaMatch?` +
+ `sourceScope?` + `analysisDepth?` + `lifecycle?` + `source`
 - `Trust` = `verified | narrowed | asserted | dark` — see Core Principles
 - `TrustReason` + `TRUST_REASON_DESCRIPTIONS` — analyzer owns the machine-readable
-  reason; explainer surfaces it instead of inventing one. Keep them in sync.
-- `SchemaMatch` = `aligned | mismatch | dark` — separate axis, Rust writes only
+ reason; explainer surfaces it instead of inventing one. Keep them in sync.
+- `SchemaMatch` = `aligned | mismatch | dark` — separate axis, Rust + Python
+ writes only
+- `AnalyzerDepth` = `deep | shallow | contract | analyzer_limit` — per-touch
+ analyzer axis (Slice 2). `analyzer_limit` is the honest "we recognised the
+ call but couldn't resolve the body" verdict — never the same as `dark`.
+- `WriterLifecycle` = `runtime | migration | seed | trigger` — WHO/WHEN
+ performs the write (Slice 3). Reads do NOT carry a lifecycle.
+- `DriftKind` (Slice 1 taxonomy) + `Fixability` (`actionable` /
+ `requires-investigation` / `informational`) + `DriftSummary` (severity/kind/
+ fixability rollup + production/test counts). `rust-conditional-serialization`
+ is distinct from `rust-missing-required-column`: the field is declared but may
+ be skipped at runtime, so it is investigation-oriented rather than "add the
+ missing column."
 - `ColumnUsage` (`verdict` + `certain` + `evidence` + `reach?` + `escapeTrail?`)
 - `SqlViewRead` (`viewName` + `table` + `confidence` + optional `columns` +
   `source`) — grounded migration view read evidence; `opaque` prevents false

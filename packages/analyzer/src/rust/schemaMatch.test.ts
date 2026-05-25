@@ -239,6 +239,41 @@ impl Client {
   assert.equal(f!.source.language, 'rust');
 });
 
+test('#[serde(skip_serializing_if = "…")] on a NOT-NULL-no-default column emits an honest "may conditionally omit" warning', async () => {
+  // batch_number is NOT NULL with no default. If a struct declares it but the
+  // field is conditionally skipped at runtime, the payload may silently omit a
+  // required column. Throughline must say so honestly — without falsely
+  // promoting the verdict to `mismatch` (the field IS declared).
+  const code = `
+#[derive(Serialize)]
+struct Ins<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch_number: Option<&'a str>,
+    product: &'a str,
+}
+impl Client {
+    async fn create(&self) {
+        self.client
+            .post(format!("{}/rest/v1/batches", self.url))
+            .json(&Ins { batch_number, product })
+            .send().await;
+    }
+}
+`;
+  const site = only(await analyzeRustSource(code, [batches()]));
+  // The field is declared, so it's still resolved — but the conditional skip
+  // means we cannot guarantee it's serialized; surface an info-level finding.
+  assert.equal(site.schemaMatch, 'aligned');
+  const cond = site.drift.find((d) => d.message.includes('`batch_number`'));
+  assert.ok(cond, 'expected a finding for the conditional NOT-NULL column');
+  assert.equal(cond!.severity, 'info');
+  assert.equal(cond!.kind, 'rust-conditional-serialization');
+  assert.equal(cond!.fixability, 'requires-investigation');
+  assert.match(cond!.recommendedAction ?? '', /always serialized|DEFAULT/);
+  assert.doesNotMatch(cond!.recommendedAction ?? '', /Add the missing NOT-NULL column/);
+  assert.match(cond!.message, /may conditionally omit/);
+});
+
 test('Option<T> fields are nullable; #[serde(rename="…")] changes the serialized key', async () => {
   const code = `
 #[derive(Serialize)]
@@ -325,7 +360,7 @@ function rustTouch(table: string, direction: 'read' | 'write', filePath: string,
 function site(table: string, verb: RustWriteSite['verb'], filePath: string, urlLine: number, schemaMatch: RustWriteSite['schemaMatch']): RustWriteSite {
   return {
     table, verb, urlLine, schemaMatch,
-    resolved: schemaMatch === 'dark' ? null : { kind: 'json', keys: [], nullableKeys: [] },
+    resolved: schemaMatch === 'dark' ? null : { kind: 'json', keys: [], nullableKeys: [], conditionalKeys: [] },
     source: { language: 'rust', filePath, startLine: urlLine, endLine: urlLine, snippet: '' },
     drift: [],
   };

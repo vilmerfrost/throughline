@@ -1,9 +1,10 @@
 import { readdir, readFile } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
-import type { ContractColumn, DriftFinding, GraphNode, SchemaMatch, SourceRef } from '@throughline/core';
+import type { ContractColumn, DriftFinding, DriftKind, GraphNode, SchemaMatch, SourceRef } from '@throughline/core';
 import { parseRustSource, type RustNode } from './parseRust.js';
 import { compareWriteFields } from '../schema/compareFields.js';
+import { fixabilityFor, recommendedActionFor } from '../drift/detect.js';
 
 // Deep-parse Rust write sites and compare the SERIALIZED FIELDS of each write
 // against the SQL schema. This replaces the shallow "all Rust writes are blind"
@@ -33,6 +34,11 @@ export interface ResolvedBody {
   structName?: string;
   keys: string[]; // serialized keys, in declaration order (after #[serde(rename)])
   nullableKeys: string[]; // subset that are Option<T> — informational
+  // Keys whose presence in the serialized payload is CONDITIONAL —
+  // `#[serde(skip_serializing_if = "…")]` etc. They appear in `keys` for
+  // best-effort presence, but the comparison must NOT count them as
+  // unconditionally present for required NOT-NULL columns.
+  conditionalKeys: string[];
 }
 
 export interface RustWriteSite {
@@ -51,7 +57,7 @@ interface StructDef {
   name: string;
   serialize: boolean;
   resolvable: boolean;
-  fields: Array<{ key: string; nullable: boolean }>;
+  fields: Array<{ key: string; nullable: boolean; conditional: boolean }>;
 }
 
 export async function analyzeRustSource(
@@ -84,8 +90,8 @@ export async function analyzeRustSource(
     const resolved = jsonArg ? resolveBody(jsonArg, block, structs, fns) : null;
 
     const source = sourceFrom(chainTop, filePath);
-    const { schemaMatch, missing, unknown } = compare(resolved, verb, contract.columns ?? []);
-    const drift = buildDrift(contract, table, verb, resolved, missing, unknown, source);
+    const { schemaMatch, missing, unknown, conditional } = compare(resolved, verb, contract.columns ?? []);
+    const drift = buildDrift(contract, table, verb, resolved, missing, unknown, conditional, source);
 
     sites.push({ table, verb, urlLine: url.line, schemaMatch, resolved, source, drift });
   }
@@ -137,7 +143,15 @@ export function attachSchemaMatch(touches: GraphNode[], sites: RustWriteSite[]):
         bestDelta = delta;
       }
     }
-    if (best && bestDelta <= LINE_TOLERANCE) touch.schemaMatch = best.schemaMatch;
+    if (best && bestDelta <= LINE_TOLERANCE) {
+      touch.schemaMatch = best.schemaMatch;
+      // When we actually resolved the payload (aligned/mismatch) we DID see
+      // the struct fields — upgrade the per-touch analysisDepth so consumers
+      // know this touch has more than shallow-grep evidence. Trust stays
+      // untouched: deep parsing is NOT compiler verification.
+      if (best.schemaMatch !== 'dark') touch.analysisDepth = 'deep';
+      else touch.analysisDepth = 'analyzer_limit';
+    }
   }
 }
 
@@ -182,15 +196,30 @@ async function walk(dir: string, out: string[]): Promise<void> {
 
 // An unresolved payload is `dark` (no name-level claim possible); otherwise we
 // delegate the name-vs-schema verdict to the ONE shared comparison that
-// check_write also uses, so the two can never disagree.
+// check_write also uses, so the two can never disagree. For Rust we ALSO
+// emit a `conditional` list: NOT-NULL-no-default columns whose only struct
+// field is `#[serde(skip_serializing_if = "…")]` — present in `keys` but not
+// guaranteed at runtime. These never flip the schema verdict (the field IS
+// declared); they only surface as a softer drift finding.
 function compare(
   resolved: ResolvedBody | null,
   verb: RustWriteSite['verb'],
   columns: ContractColumn[],
-): { schemaMatch: SchemaMatch; missing: string[]; unknown: string[] } {
-  if (!resolved) return { schemaMatch: 'dark', missing: [], unknown: [] };
+): { schemaMatch: SchemaMatch; missing: string[]; unknown: string[]; conditional: string[] } {
+  if (!resolved) return { schemaMatch: 'dark', missing: [], unknown: [], conditional: [] };
   const r = compareWriteFields(resolved.keys, verb, columns);
-  return { schemaMatch: r.schemaMatch, missing: r.missingRequired, unknown: r.unknownKeys };
+  const conditional =
+    verb === 'insert'
+      ? columns
+          .filter((c) => c.nullable === false && !c.hasDefault && resolved.conditionalKeys.includes(c.name))
+          .map((c) => c.name)
+      : [];
+  return {
+    schemaMatch: r.schemaMatch,
+    missing: r.missingRequired,
+    unknown: r.unknownKeys,
+    conditional,
+  };
 }
 
 function buildDrift(
@@ -200,28 +229,50 @@ function buildDrift(
   resolved: ResolvedBody | null,
   missing: string[],
   unknown: string[],
+  conditional: string[],
   source: SourceRef,
 ): DriftFinding[] {
   if (!resolved) return []; // unresolved → never a column-level claim
   const origin = resolved.structName ? `built from struct \`${resolved.structName}\`` : 'free-form payload';
   const findings: DriftFinding[] = [];
   for (const col of missing) {
-    findings.push({
-      contractId: contract.id,
-      severity: 'warn',
-      message: `Rust ${verb} of \`${table}\` omits NOT-NULL column \`${col}\` (${origin}).`,
-      source,
-    });
+    findings.push(taggedFinding(contract, source, 'warn',
+      `Rust ${verb} of \`${table}\` omits NOT-NULL column \`${col}\` (${origin}).`,
+      'rust-missing-required-column'));
   }
   for (const key of unknown) {
-    findings.push({
-      contractId: contract.id,
-      severity: 'warn',
-      message: `Rust ${verb} of \`${table}\` writes unknown key \`${key}\` not in the schema (${origin}).`,
-      source,
-    });
+    findings.push(taggedFinding(contract, source, 'warn',
+      `Rust ${verb} of \`${table}\` writes unknown key \`${key}\` not in the schema (${origin}).`,
+      'rust-unknown-key'));
+  }
+  // `skip_serializing_if` on a NOT-NULL-no-default column: the field exists,
+  // so this is not a `mismatch`, but the runtime payload may omit it. Emit
+  // an info-level finding so consumers can see the risk without overclaiming.
+  for (const col of conditional) {
+    findings.push(taggedFinding(contract, source, 'info',
+      `Rust ${verb} of \`${table}\` may conditionally omit NOT-NULL column \`${col}\` ` +
+        `(${origin}; field carries \`#[serde(skip_serializing_if = …)]\`).`,
+      'rust-conditional-serialization'));
   }
   return findings;
+}
+
+function taggedFinding(
+  contract: GraphNode,
+  source: SourceRef,
+  severity: DriftFinding['severity'],
+  message: string,
+  kind: DriftKind,
+): DriftFinding {
+  return {
+    contractId: contract.id,
+    severity,
+    message,
+    source,
+    kind,
+    fixability: fixabilityFor(kind),
+    recommendedAction: recommendedActionFor(kind),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +324,7 @@ function resolveStruct(name: string, structs: Map<string, StructDef>): ResolvedB
     structName: name,
     keys: def.fields.map((f) => f.key),
     nullableKeys: def.fields.filter((f) => f.nullable).map((f) => f.key),
+    conditionalKeys: def.fields.filter((f) => f.conditional).map((f) => f.key),
   };
 }
 
@@ -290,7 +342,7 @@ function resolveJsonMacro(macro: RustNode): ResolvedBody | null {
       keys.push(stripQuotes(k.text));
     }
   }
-  return { kind: 'json', keys, nullableKeys: [] };
+  return { kind: 'json', keys, nullableKeys: [], conditionalKeys: [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +388,15 @@ function readStruct(name: string, node: RustNode): StructDef {
       const fieldName = child.childForFieldName('name')?.text;
       if (!fieldName) continue;
       const typeNode = child.childForFieldName('type');
-      fields.push({ key: serde.rename ?? fieldName, nullable: isOption(typeNode) });
+      fields.push({
+        key: serde.rename ?? fieldName,
+        nullable: isOption(typeNode),
+        // `skip_serializing_if = "…"` means presence is conditional at runtime.
+        // We keep the key (best-effort) but track it so the comparison won't
+        // treat a NOT-NULL-no-default column as guaranteed-present from a
+        // conditional field.
+        conditional: serde.skipIf,
+      });
     }
   }
   return { name, serialize, resolvable, fields };
@@ -351,20 +411,26 @@ function hasSerializeDerive(structNode: RustNode): boolean {
   return false;
 }
 
-function parseSerdeFieldAttrs(attrs: string[]): { rename?: string; skip: boolean; flatten: boolean } {
+function parseSerdeFieldAttrs(attrs: string[]): { rename?: string; skip: boolean; flatten: boolean; skipIf: boolean } {
   let rename: string | undefined;
   let skip = false;
   let flatten = false;
+  let skipIf = false;
   for (const a of attrs) {
     if (!/\bserde\b/.test(a)) continue;
     const r = /\brename\s*=\s*"([^"]+)"/.exec(a);
     if (r) rename = r[1];
     if (/\bflatten\b/.test(a)) flatten = true;
-    // `skip` / `skip_serializing` always drop the field; `skip_serializing_if`
-    // is conditional, so we keep the key (best-effort presence).
-    if (/\bskip\b/.test(a) || /\bskip_serializing\b(?!_if)/.test(a)) skip = true;
+    // `skip_serializing_if` makes the field's presence CONDITIONAL — we keep
+    // the key (best-effort) but mark it conditional so the compare doesn't
+    // overclaim "required column is present" when it might be skipped.
+    if (/\bskip_serializing_if\b/.test(a)) skipIf = true;
+    // `skip` / `skip_serializing` (without `_if`) unconditionally drops the
+    // field. Detect with a negative lookbehind so `skip_serializing_if` is not
+    // collapsed into the unconditional bucket.
+    if (/\bskip\b(?!_)/.test(a) || /\bskip_serializing\b(?!_)/.test(a)) skip = true;
   }
-  return { rename, skip, flatten };
+  return { rename, skip, flatten, skipIf };
 }
 
 function isOption(typeNode: RustNode | null): boolean {

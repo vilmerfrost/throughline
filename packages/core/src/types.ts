@@ -54,7 +54,8 @@ export type TrustReason =
   | 'ts-bypass-any'
   | 'ts-loose-client'
   | 'shallow-grep-python'
-  | 'shallow-grep-rust';
+  | 'shallow-grep-rust'
+  | 'shallow-grep-sql';
 
 // Plain-English description of each TrustReason. Lives next to the type so
 // the explainer prompt and any docs stay consistent with the analyzer.
@@ -75,12 +76,26 @@ export const TRUST_REASON_DESCRIPTIONS: Record<TrustReason, string> = {
     'Python is shallow-grep only in Throughline v1. The analyzer can detect that a write happens but cannot infer types. All Python touches are dark by analyzer definition.',
   'shallow-grep-rust':
     'Rust is shallow-grep only in Throughline v1. The analyzer detects PostgREST URL paths but cannot infer types. All Rust touches are dark by analyzer definition.',
+  'shallow-grep-sql':
+    'SQL data writes are detected from migration/seed/trigger statements. Throughline can identify the verb and table, but this pass does not infer a typed payload shape.',
 };
 
 // Per-language analyzer depth, surfaced into the explainer so it can correctly
 // answer "how do I make this green?" — the answer often depends on the
 // analyzer, not on the user's code.
-export type AnalyzerDepth = 'deep' | 'shallow' | 'contract';
+//
+// 'contract'      SQL is the schema spine: every column/type is parsed from the
+//                 migrations themselves.
+// 'deep'          AST-resolved facts (ts-morph for TypeScript; tree-sitter for
+//                 Rust write payloads; tree-sitter for Python supabase-py
+//                 payloads). Field names line up against the real schema.
+// 'shallow'       line/regex detection only — direction + table name, never
+//                 field-level claims. The honest default for unstudied languages.
+// 'analyzer_limit' the analyzer recognised the call site but explicitly bailed
+//                 out (dynamic payload, unresolved variable, helper we don't
+//                 follow). Carries the truthful "we don't know" — never `dark`
+//                 masquerading as `verified`.
+export type AnalyzerDepth = 'deep' | 'shallow' | 'contract' | 'analyzer_limit';
 export const ANALYZER_DEPTH: Record<Language, AnalyzerDepth> = {
   sql: 'contract',
   typescript: 'deep',
@@ -154,6 +169,21 @@ export interface SqlViewRead {
   note?: string;
 }
 
+// Lifecycle of a write touch: WHEN/WHO performs the write, not WHAT it writes.
+// This is a separate axis from trust/schemaMatch/sourceScope: a migration write
+// can be perfectly schema-aligned but is not the same actor as a runtime app
+// write, and grouping them together hides real risk both ways.
+//
+// runtime   default — the writer is application code (the things our existing
+//           Touch nodes already represent).
+// migration the write happens as part of an idempotent migration (a `INSERT INTO`
+//           or `UPDATE` inside `supabase/migrations/**/*.sql`).
+// seed      one-off / non-migration data load (e.g. `scripts/seed*.py` runs that
+//           are intended to populate the table once).
+// trigger   the write happens inside a SQL trigger function body — driven by
+//           the database itself, NOT by application code.
+export type WriterLifecycle = 'runtime' | 'migration' | 'seed' | 'trigger';
+
 export interface GraphNode {
   id: string;
   kind: NodeKind;
@@ -165,6 +195,16 @@ export interface GraphNode {
   trustReason?: TrustReason; // why the analyzer chose this trust level
   schemaMatch?: SchemaMatch; // Stage 1a (additive): deep-parsed write touches only — struct-vs-schema verdict, separate from `trust`
   sourceScope?: SourceScope; // touch/boundary nodes: production/test/migration/script/generated/unknown
+  // Additive: per-touch analyzer depth. Tells consumers WHAT analyzer produced
+  // this fact — separate from trust, never folded into 'verified'. A `deep`
+  // payload that resolved to a known field set is still NOT compiler-checked;
+  // an `analyzer_limit` touch is honest about the analyzer giving up.
+  analysisDepth?: AnalyzerDepth;
+  // Additive: WHO writes / WHEN. A migration backfill is real evidence but it
+  // is not the same actor as a runtime insert; consumers can split risk by
+  // lifecycle. Reads carry 'runtime' (or omit it) — we never claim a "migration
+  // read" exists.
+  lifecycle?: WriterLifecycle;
   source?: SourceRef; // grounds the node in real code
   notes?: string; // short "what this does" explanation
 }
@@ -178,17 +218,84 @@ export interface GraphEdge {
   direction: EdgeDirection;
 }
 
+// Drift taxonomy. Every drift finding belongs to ONE category so consumers
+// (UI, MCP, explainer) can summarize and group without re-parsing the message.
+// Categories are deliberately small and stable; new categories are added rather
+// than reshuffling existing ones.
+//
+// 'cross-language-blind-boundary' a shallow-dark writer in one language and a
+//                                 reader in another — schema change won't be
+//                                 caught at any boundary.
+// 'multi-writer-no-shared-type'   2+ writing languages with no shared schema
+//                                 type between them.
+// 'all-dark-writes'               every direct writer on the table is type-blind.
+// 'asymmetry-no-reader'           written but no detected reader.
+// 'asymmetry-no-writer'           read but no detected writer.
+// 'untouched-contract'            a SQL table no scanned code touches.
+// 'rust-missing-required-column'  Stage 1a Rust: a NOT-NULL-no-default column
+//                                 is missing from a resolved write payload.
+// 'rust-conditional-serialization' Stage 1a Rust: a NOT-NULL-no-default column
+//                                 is declared in the struct but may be skipped
+//                                 at runtime by serde conditional serialization.
+// 'rust-unknown-key'              Stage 1a Rust: payload writes a key not in
+//                                 the schema.
+// 'python-missing-required-column' supabase-py: same, for a resolved Python
+//                                 insert payload.
+// 'python-unknown-key'            supabase-py: payload writes a key not in the
+//                                 schema.
+export type DriftKind =
+  | 'cross-language-blind-boundary'
+  | 'multi-writer-no-shared-type'
+  | 'all-dark-writes'
+  | 'asymmetry-no-reader'
+  | 'asymmetry-no-writer'
+  | 'untouched-contract'
+  | 'rust-missing-required-column'
+  | 'rust-conditional-serialization'
+  | 'rust-unknown-key'
+  | 'python-missing-required-column'
+  | 'python-unknown-key';
+
+// How directly fixable a finding is. Like trust, this is a CLASSIFICATION, not a
+// promise — `actionable` means we know the lever, not that the fix is small.
+//
+// actionable             we point at the lever to flip (e.g. "type this client
+//                        with `SupabaseClient<Database>`", "add column X").
+// requires-investigation real evidence of risk but the fix depends on intent
+//                        (e.g. cross-language boundary — maybe by design).
+// informational          context, not a defect (e.g. untouched contract).
+export type Fixability = 'actionable' | 'requires-investigation' | 'informational';
+
 export interface DriftFinding {
   contractId: string;
   // Table-level risk, OR a field-level claim that is PROVEN — i.e. grounded in a
-  // write payload whose fields were actually resolved (Stage 1a Rust). Never an
-  // unproven column-level guess.
+  // write payload whose fields were actually resolved (Stage 1a Rust + Python).
+  // Never an unproven column-level guess.
   message: string;
   severity: 'info' | 'warn' | 'error';
   source: SourceRef;
   scopeBreakdown?: Partial<Record<SourceScope, number>>;
   productionImpact?: boolean;
   testOnly?: boolean;
+  // Additive: taxonomy + fix orientation. Optional so existing consumers and
+  // the offline mock keep compiling; populated by `detectDrift` and by the
+  // per-language deep-write analyzers (Rust Stage 1a, Python payload tracing).
+  kind?: DriftKind;
+  fixability?: Fixability;
+  // One-sentence remediation hint. Grounded by `kind`/`source`, never invented.
+  recommendedAction?: string;
+}
+
+// Aggregate drift counts for an entire graph. Pure rollup of facts already in
+// `Graph.drift` — never invented, never reweighted. Consumers (UI, MCP) use
+// this to render "how bad is this repo?" without recounting.
+export interface DriftSummary {
+  total: number;
+  bySeverity: Partial<Record<DriftFinding['severity'], number>>;
+  byKind: Partial<Record<DriftKind, number>>;
+  byFixability: Partial<Record<Fixability, number>>;
+  productionImpact: number;
+  testOnly: number;
 }
 
 // RC-a (ADDITIVE): WHY an 'unresolved-origin' touch couldn't be traced to a
@@ -278,6 +385,10 @@ export interface Graph {
   nodes: GraphNode[];
   edges: GraphEdge[];
   drift: DriftFinding[];
+  // Additive: aggregate counts over `drift`. Optional so existing consumers
+  // and the offline mock keep compiling; populated by `buildGraph` via
+  // `summarizeDrift(drift)`.
+  driftSummary?: DriftSummary;
   // RC-a (additive, optional so existing consumers keep compiling): deterministic
   // root-cause rollup of dark/asserted TS touches, ranked biggest-lever-first.
   rootCauses?: RootCause[];

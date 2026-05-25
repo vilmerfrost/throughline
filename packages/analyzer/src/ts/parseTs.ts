@@ -19,6 +19,7 @@ import type {
   TrustReason,
 } from '@throughline/core';
 import { classifySourceScope } from '../sourceScope.js';
+import { classifyWriterLifecycle } from '../lifecycle.js';
 import {
   classifyUnresolved,
   resolveClientOrigin,
@@ -93,6 +94,7 @@ export async function parseTs(
         const touch = describeTouch(access, repoPath, sf);
         const id = uniqueId(touch.id, usedIds);
 
+        const lifecycle = classifyWriterLifecycle(touch.source.filePath, touch.direction, touch.sourceScope);
         nodes.push({
           id,
           kind: 'touch',
@@ -101,6 +103,9 @@ export async function parseTs(
           trust: touch.trust,
           trustReason: touch.trustReason,
           sourceScope: touch.sourceScope,
+          // ts-morph deep parse populated this touch.
+          analysisDepth: 'deep',
+          ...(lifecycle ? { lifecycle } : {}),
           source: touch.source,
           notes: touch.notes,
         });
@@ -169,7 +174,7 @@ export async function parseTs(
     );
   }
 
-  return { nodes, edges, rootCauses: rollupRootCauses(rootCauseInputs), helperAliases: [...helperAliases.values()] };
+  return { nodes, edges, rootCauses: rollupRootCauses(rootCauseInputs), helperAliases };
 }
 
 // ---------------------------------------------------------------------------

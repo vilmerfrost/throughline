@@ -250,6 +250,28 @@ const RECIPES: Record<TrustReason, Recipe> = {
       },
     },
   },
+
+  'shallow-grep-sql': {
+    kind: 'no-fix-needed',
+    title: 'Review this SQL data write lifecycle',
+    summary:
+      'This is a SQL migration/seed/trigger data write. It is grounded, but not a runtime app writer.',
+    context:
+      'Throughline detected a real SQL data write in a migration, seed, or trigger/function body. This pass knows the verb and table, but does not infer a typed payload shape. Treat this as lifecycle evidence, not as a type-safety problem in application code.',
+    changes: [
+      'Do not rewrite application code based only on this SQL lifecycle touch.',
+      'If the data write is intentional (backfill, seed, audit trigger), leave it as-is or add a concise SQL comment documenting why it exists.',
+      'If the write is stale or unsafe, handle it as a migration/data-maintenance change with normal database review.',
+    ],
+    acceptance: [
+      'The SQL statement remains grounded in the migration/seed/trigger file or is intentionally removed.',
+      'No unrelated runtime application writer is changed as a side effect.',
+    ],
+    outOfScope: [
+      'Typing runtime Supabase clients.',
+      'Refactoring unrelated migrations or application code.',
+    ],
+  },
 };
 
 export function buildFixPrompt(node: GraphNode, context: ExplainContext): FixPrompt {

@@ -71,6 +71,7 @@ test('getTableFacts: scope filter excludes other touches and reports excluded co
   assert.equal(t.touches.readers.length, 1);
   assert.equal(t.touches.writers.length, 0);
   assert.deepEqual(t.excludedTouches, { script: 1 });
+  assert.equal(t.drift.length, 0);
 });
 
 test('getTableFacts: all scope groups touches by source scope', () => {
