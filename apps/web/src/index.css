@@ -22,16 +22,28 @@
   --color-edge-write: #f87171;
   /* AI commentary accent (kept distinct from the grounded trust palette) */
   --color-ai: #8b5cf6;
-  /* surfaces */
-  --color-bg-base: #0a0a0a;
-  --color-bg-surface: #171717;
-  --color-bg-node: rgba(23, 23, 23, 0.95);
-  --color-grid: #262626;
-  --color-border-subtle: #262626;
+  /* surfaces — cool-slate neutral ramp + a 2-step elevation ladder. The hue is
+     a faint push toward the contract blue (you feel depth, not color); the
+     semantic verdict tokens above are deliberately untouched so they lift OFF
+     this chrome rather than competing with it. Tiers, dark→light:
+       base    = sunken canvas / side panels (the floor)
+       surface = mid fills (lane headers, legend, inputs)
+       node    = a raised CARD (touch/spine/inspector cards)
+       popover = the top layer (tooltips, fix-prompt blocks) */
+  --color-bg-base: #0b0d10;
+  --color-bg-surface: #141821;
+  --color-bg-node: rgba(26, 31, 41, 0.96);
+  --color-bg-popover: #232a36;
+  --color-grid: #191d25;
+  --color-border-subtle: #262c37;
+  /* elevation — paired with the tier above so a card reads as floating, not as
+     a hairline-bordered rectangle. elev-1 = card; elev-2 = popover/top layer. */
+  --elev-1: inset 0 1px 0 rgba(255, 255, 255, 0.045), 0 2px 6px rgba(0, 0, 0, 0.5);
+  --elev-2: 0 16px 44px rgba(0, 0, 0, 0.62), 0 2px 8px rgba(0, 0, 0, 0.5);
   /* text */
-  --color-text-primary: #f5f5f5;
-  --color-text-secondary: #a3a3a3;
-  --color-text-muted: #525252;
+  --color-text-primary: #f4f6f8;
+  --color-text-secondary: #9aa1ad;
+  --color-text-muted: #565d68;
 }
 
 html,

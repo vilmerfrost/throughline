@@ -80,14 +80,29 @@ is verified by a real-repo report script, not just unit tests (see Conventions).
 - **Stage 1a — Rust schema-match** — deep-parses Rust write payloads, stamps
   `schemaMatch` (aligned/mismatch/dark) onto still-`dark` Rust touches + grounded
   column-level drift. `trust` left as-is. (`rust/parseRust.ts`, `rust/schemaMatch.ts`)
-- **Column usage + B1 reach axis** — per-column read verdicts (`used`/`likely_*`/
+- **Column usage + B1/B2 reach axis** — per-column read verdicts (`used`/`likely_*`/
   `unknown`) and a `reach` axis (where the value travels: `ui_shown`/`server_only`/
-  `never_read`/`unknown`). Analyzer populates `reach`; **B2 (UI surfacing) is the
-  next step.** (`ts/columnUsage.ts`, `ts/reach.ts`)
+  `never_read`/`unknown`). TypeScript reach is augmented by grounded SQL view read
+  evidence from migration `CREATE VIEW` statements: precise view columns become
+  DB-side `used`/`server_only`; opaque views prevent false `never_read` claims by
+  making affected columns `unknown`. (`ts/columnUsage.ts`, `ts/reach.ts`,
+  `sql/parseSql.ts`)
 - **RC-a — root-cause rollup** — deterministic grouping of dark/asserted TS
   touches by (reason, client-origin); "fix THIS construction → flip N touches",
   ranked biggest-lever-first. Unresolved origins classified by `UnresolvedShape`.
   Surfaced as the Root Causes view in the web UI. (`ts/rootCause.ts`, `RootCausesView.tsx`)
+- **SQL view readers** — extracts view-defined reads from migrations with honest
+  confidence: `certain` only for attributable base-table columns (`t.col`, `t.*`,
+  or single-table `*` expanded against known schema), `opaque` for CTE/subquery/
+  ambiguous shapes. View reads are evidence that the DB computes/serves a value,
+  not proof that a user sees it. (`SqlViewRead`, `parseSql.ts`, `verify-reach.mts`)
+- **Source scope + simple TS table helpers** — every touch is classified by file
+  scope (`production`/`test`/`migration`/`script`/`generated`/`unknown`) so
+  drift/root-cause/MCP output can distinguish production impact from test-only
+  evidence. The TS analyzer also follows simple helpers that return one obvious
+  `client.from('<table>')`, preserving table identity at call sites like
+  `adapterRunsTable(admin).insert(...)` without broad interprocedural claims.
+  (`sourceScope.ts`, `ts/tableHelpers.ts`, `parseTs.ts`, `columnUsage.ts`, `reach.ts`)
 - **FK-A1 — declared relationships** — extracts declared foreign keys from
   migrations (inline / table-level / `ALTER ADD CONSTRAINT`) with honest
   cardinality inference. Surfaced as the FK neighborhood band in the focus view.
@@ -128,6 +143,7 @@ pnpm --filter @throughline/web dev         # web alone — falls back to bundled
 pnpm --filter @throughline/analyzer exec tsx scripts/verify-fk.mts [repoPath]
 pnpm --filter @throughline/analyzer exec tsx scripts/verify-reach.mts [repoPath]
 pnpm --filter @throughline/analyzer exec tsx scripts/verify-rootcause.mts [repoPath]
+pnpm --filter @throughline/analyzer exec tsx scripts/verify-client-alias.mts [repoPath]  # isTypedClient vs behavioral truth
 ```
 
 ---
@@ -138,11 +154,11 @@ pnpm --filter @throughline/analyzer exec tsx scripts/verify-rootcause.mts [repoP
 local repo on disk
       ↓
 Analyzer (Express, :4000)  — buildGraph(repoPath) [in buildGraph.ts] composes additive stages:
-  parseSchema(SQL)  → contract nodes + FK relationships
+  parseSchema(SQL)  → contract nodes + FK relationships + SQL view reads
   loadProject       → one shared ts-morph Project (type resolution paid once)
-  parseTs           → deep TS touches + edges + rootCauses
+  parseTs           → deep TS touches + edges + rootCauses + simple table helper aliases
   grepShallow       → shallow Python/Rust touches + edges
-  computeColumnUsage→ per-column read verdicts + reach (attached to contracts)
+  computeColumnUsage→ per-column read verdicts + reach (TS + SQL view evidence, attached to contracts)
   analyzeRustWrites → Stage 1a schemaMatch + grounded Rust drift
   detectDrift       → table-level drift findings
       ↓ Graph JSON
@@ -185,7 +201,9 @@ throughline/
 | `packages/mcp/src/index.ts` + `server.ts` + `facts.ts` | MCP server entry + tool registration + the functions that turn a `Graph` into agent-readable facts (incl. `checkWrite`) |
 | `packages/analyzer/src/schema/compareFields.ts` | `compareWriteFields` — the ONE pure field-names-vs-schema comparison shared by the Rust write analyzer and MCP `check_write` (insert/update rules + `hasDefault`); exported via `@throughline/analyzer/schema/compareFields` |
 | `packages/analyzer/src/sql/parseSql.ts` | `parseSchema` — SQL contract nodes (via `pgsql-ast-parser`) + FK-A1 declared relationships |
-| `packages/analyzer/src/ts/parseTs.ts` | Deep TS analyzer (`ts-morph`): trust classification, touches, edges, root causes |
+| `packages/analyzer/src/sourceScope.ts` | File-path source scope classifier for touch facts (`production`/`test`/`migration`/`script`/`generated`/`unknown`) |
+| `packages/analyzer/src/ts/parseTs.ts` | Deep TS analyzer (`ts-morph`): trust classification, touches, edges, root causes. `isTypedClient` decides `SupabaseClient<Database>` by the receiver's resolved **symbol + first type-argument** (not `getText()` substrings), so it sees through type aliases (`type Admin = SupabaseClient<Database>`) and alias chains, while keeping bare `SupabaseClient` / `<any>` / a `& SupabaseClient` intersection's bare arm `dark`. Validated against behavioral truth (the real `.from()` query-builder result) by `scripts/verify-client-alias.mts`. |
+| `packages/analyzer/src/ts/tableHelpers.ts` | Conservative simple Supabase helper detection (`function x(client) { return client.from('table') }`) shared by TS touch, column usage, and reach passes |
 | `packages/analyzer/src/ts/columnUsage.ts` | Per-column read verdicts attached to contract nodes |
 | `packages/analyzer/src/ts/reach.ts` | B1 reach axis — where a read column's value travels |
 | `packages/analyzer/src/ts/rootCause.ts` | RC-a deterministic root-cause rollup |
@@ -206,14 +224,21 @@ throughline/
 
 All in `packages/core/src/types.ts`. The load-bearing types:
 
-- `Graph` — `{ repoPath, nodes, edges, drift, rootCauses?, relationships?, generatedAt }`
+- `Graph` — `{ repoPath, nodes, edges, drift, rootCauses?, relationships?, sqlViewReads?, helperAliases?, generatedAt }`
 - `GraphNode` — `kind: 'contract'|'touch'|'boundary'`; contracts carry `columns` +
-  `columnUsage`; touches carry `trust` + `trustReason` + `schemaMatch?` + `source`
+  `columnUsage`; touches carry `trust` + `trustReason` + `schemaMatch?` +
+  `sourceScope?` + `source`
 - `Trust` = `verified | narrowed | asserted | dark` — see Core Principles
 - `TrustReason` + `TRUST_REASON_DESCRIPTIONS` — analyzer owns the machine-readable
   reason; explainer surfaces it instead of inventing one. Keep them in sync.
 - `SchemaMatch` = `aligned | mismatch | dark` — separate axis, Rust writes only
 - `ColumnUsage` (`verdict` + `certain` + `evidence` + `reach?` + `escapeTrail?`)
+- `SqlViewRead` (`viewName` + `table` + `confidence` + optional `columns` +
+  `source`) — grounded migration view read evidence; `opaque` prevents false
+  no-reader claims but never claims exact columns.
+- `SourceScope` = `production | test | migration | script | generated | unknown` —
+  separate from trust/confidence; test evidence is real but summarized differently.
+- `TableHelperAlias` — simple TS helper facts for one-table Supabase helpers only.
 - `RootCause` + `RootCauseOrigin` + `UnresolvedShape`
 - `Relationship` + `Cardinality` (`many-to-one` default; `one-to-one` only when the
   FK column is itself a PK or single-column UNIQUE; composite FKs stay many-to-one)
@@ -242,6 +267,16 @@ OPENROUTER_MODEL=google/gemini-3.5-flash   # optional override; this is the defa
   line numbers, columns, or construction sites.
 - Unsure → emit the honest fallback (`unknown` / `dark` / `other`), never a guess.
 - Keep `trust`, `schemaMatch`, and the `reach` axis as separate axes. Do not merge.
+- Keep `sourceScope` separate too. Do not globally skip tests; classify them and
+  avoid mixing test-only risk with production impact.
+- Reach is scoped to scanned TypeScript UI plus migration-defined SQL views.
+  `server_only` means outside scanned JSX, not "safe to delete"; `never_read`
+  means no scanned reader found, not proof of dead data. Python/Rust/raw SQL/
+  external agents can still consume columns unless specifically analyzed.
+- TS drift coverage gets sharper after Supabase clients carry
+  `SupabaseClient<Database>`. Loose clients and usage-site casts can hide
+  wrong-column reads from both TypeScript and Throughline until types are
+  tightened.
 - New `Graph`/`GraphNode` fields are **optional + additive** so the mock and other
   consumers keep compiling.
 
@@ -279,7 +314,8 @@ OPENROUTER_MODEL=google/gemini-3.5-flash   # optional override; this is the defa
 - **core**: types only — `main`/`types` point at raw `src/types.ts`, no build step
 - **analyzer**: Express 4, `ts-morph` (deep TS), `pgsql-ast-parser` (SQL),
   `web-tree-sitter` + `tree-sitter-wasms` (shallow), `dotenv`, `cors`; runs via `tsx`
-- **web**: Vite 5, React 18, `@xyflow/react` (React Flow), `dagre` layout, Tailwind 3
+- **web**: Vite 5, React 18, `@xyflow/react` (React Flow), `dagre` layout, Tailwind 3,
+  `lucide-react` (node/legend icons)
 - **AI**: OpenRouter (`google/gemini-3.5-flash` by default, `OPENROUTER_MODEL`-overridable), server-side only
 
 ---

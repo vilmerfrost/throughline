@@ -1,15 +1,15 @@
 import {
   Node,
+  SyntaxKind,
   type CallExpression,
   type ElementAccessExpression,
   type Project,
   type PropertyAccessExpression,
   type SourceFile,
 } from 'ts-morph';
-import type { ColumnReach, GraphNode, SourceRef } from '@throughline/core';
+import type { ColumnReach, GraphNode, SourceRef, SqlViewRead } from '@throughline/core';
 import {
   EXCLUDE,
-  findFromCalls,
   inJsx,
   literalString,
   refFrom,
@@ -17,6 +17,8 @@ import {
   walkChain,
   type ChainInfo,
 } from './columnUsage.js';
+import { isTypedClient } from './parseTs.js';
+import { collectTableHelperAliases, findTableAccesses, type TableAccess } from './tableHelpers.js';
 
 // ---------------------------------------------------------------------------
 // Reach analysis (TypeScript only) — the B1 axis.
@@ -77,6 +79,7 @@ interface ReachAcc {
   colEscapes: Map<string, SourceRef[]>; // a known column's value flowed into untyped scope → unknown
   explicitSelected: Set<string>; // named in an explicit `select(...)` — fetched server-side (weak server signal)
   hidingReads: SourceRef[]; // an escaping/untyped read that could hide ANY column
+  opaqueSqlViews: SourceRef[]; // SQL view reads this table, but exact columns are opaque
 }
 
 interface Ctx {
@@ -94,6 +97,7 @@ export function computeReach(
   repoPath: string,
   contracts: GraphNode[],
   project: Project,
+  sqlViewReads: SqlViewRead[] = [],
 ): Map<string, Map<string, ReachResult>> {
   const tables = new Map<string, ReachAcc>();
   for (const c of contracts) {
@@ -105,20 +109,28 @@ export function computeReach(
       colEscapes: new Map(),
       explicitSelected: new Set(),
       hidingReads: [],
+      opaqueSqlViews: [],
     });
   }
   if (tables.size === 0) return new Map();
+
+  applySqlViewReads(tables, sqlViewReads);
+  const helperAliases = collectTableHelperAliases(
+    project,
+    repoPath,
+    new Set(tables.keys()),
+    isTypedClient,
+    resolveTableArg,
+  );
 
   const jsxFiles = new Map<string, boolean>();
   for (const sf of project.getSourceFiles()) {
     if (EXCLUDE.test(sf.getFilePath())) continue;
     try {
-      for (const fromCall of findFromCalls(sf)) {
-        const table = resolveTableName(fromCall.getArguments()[0]);
-        if (!table) continue;
-        const acc = tables.get(table);
+      for (const access of findTableAccesses(sf, helperAliases, resolveTableArg)) {
+        const acc = tables.get(access.table);
         if (!acc) continue;
-        traceRead(fromCall, acc, repoPath, jsxFiles);
+        traceRead(access, acc, repoPath, jsxFiles);
       }
     } catch {
       // A malformed file must never sink the whole analysis; skip it.
@@ -161,18 +173,35 @@ function decide(col: string, acc: ReachAcc): ReachResult {
 
   if (acc.hidingReads.length > 0) return { reach: 'unknown', escapeTrail: acc.hidingReads.slice(0, MAX_TRAIL) };
 
+  if (acc.opaqueSqlViews.length > 0) return { reach: 'unknown', escapeTrail: acc.opaqueSqlViews.slice(0, MAX_TRAIL) };
+
   return { reach: 'never_read' };
+}
+
+function applySqlViewReads(tables: Map<string, ReachAcc>, sqlViewReads: SqlViewRead[]) {
+  for (const read of sqlViewReads) {
+    const acc = tables.get(read.table);
+    if (!acc) continue;
+    if (read.confidence === 'certain') {
+      for (const col of read.columns ?? []) {
+        if (acc.columns.has(col)) push(acc.server, col, read.source);
+      }
+    } else {
+      acc.opaqueSqlViews.push(read.source);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Per-read tracing.
 // ---------------------------------------------------------------------------
 
-function traceRead(fromCall: CallExpression, acc: ReachAcc, repoPath: string, jsxFiles: Map<string, boolean>) {
-  const chain = walkChain(fromCall);
+function traceRead(access: TableAccess, acc: ReachAcc, repoPath: string, jsxFiles: Map<string, boolean>) {
+  const chain = walkChain(access.rootCall);
   if (chain.isWrite) return;
 
   const named = chain.explicitColumns ? chain.explicitColumns.filter((c) => acc.columns.has(c)) : null;
+  if (!access.alias && isBareReturnedBuilder(access.rootCall, chain)) return;
 
   // Naming a column in an explicit `.select(...)` proves it is FETCHED
   // server-side, but says nothing about where the value then travels. Record it
@@ -195,7 +224,7 @@ function traceRead(fromCall: CallExpression, acc: ReachAcc, repoPath: string, js
   const binding = resolveResultBinding(chain);
   if (binding.kind === 'none') return; // fetched but not bound, or only `{ error }` — no reach signal
   if (binding.kind === 'escaped') {
-    recordEscape(ctx, rowsShape, binding.ref ?? fromCall);
+    recordEscape(ctx, rowsShape, binding.ref ?? access.rootCall);
     return;
   }
   if (binding.kind === 'directCols') {
@@ -735,4 +764,13 @@ function isUntyped(node: Node): boolean {
   } catch {
     return true; // can't resolve a type → don't trust it
   }
+}
+
+function resolveTableArg(arg: Node | undefined): { name?: string; bypass: boolean } {
+  return { name: resolveTableName(arg), bypass: false };
+}
+
+function isBareReturnedBuilder(fromCall: CallExpression, chain: ChainInfo): boolean {
+  if (chain.outerCall !== fromCall) return false;
+  return fromCall.getParent()?.getParent()?.getKind() === SyntaxKind.ReturnStatement;
 }

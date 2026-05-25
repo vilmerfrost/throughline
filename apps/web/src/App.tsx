@@ -21,6 +21,7 @@ type View = 'focus' | 'roots' | 'map';
 
 export function App() {
   const [graph, setGraph] = useState<Graph | null>(null);
+  const [previousGraph, setPreviousGraph] = useState<Graph | null>(null);
   const [live, setLive] = useState(false);
   const [view, setView] = useState<View>('focus');
   const [refreshing, setRefreshing] = useState(false);
@@ -41,12 +42,13 @@ export function App() {
     setRefreshing(true);
     try {
       const result = await fetchGraph();
+      setPreviousGraph(graph);
       setGraph(result.graph);
       setLive(result.live);
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [graph]);
 
   useEffect(() => {
     let cancelled = false;
@@ -260,12 +262,13 @@ export function App() {
             </div>
           </aside>
 
-          {/* CENTER — the focus flow + persistent legend */}
+          {/* CENTER — the focus flow + collapsible legend. Header bar is kept
+              compact so the flow diagram itself reads as the focal point. */}
           <div className="flex min-w-0 flex-1 flex-col">
-            <div className="grid grid-cols-3 border-b border-neutral-800 bg-neutral-900 text-[11px] font-medium uppercase tracking-wide text-neutral-500">
-              <div className="px-4 py-2">Writers — data enters</div>
-              <div className="px-4 py-2 text-center text-neutral-300">Source of truth</div>
-              <div className="px-4 py-2 text-right">Readers — data exits</div>
+            <div className="grid grid-cols-3 border-b border-neutral-800 bg-neutral-900/70 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
+              <div className="px-4 py-1.5">Writers — data enters</div>
+              <div className="px-4 py-1.5 text-center text-neutral-300">Source of truth</div>
+              <div className="px-4 py-1.5 text-right">Readers — data exits</div>
             </div>
             <div className="min-h-0 flex-1">
               {displayModel ? (
@@ -305,7 +308,7 @@ export function App() {
         </main>
       ) : view === 'roots' ? (
         graph ? (
-          <RootCausesView graph={graph} onShowAffected={showAffectedContracts} />
+          <RootCausesView graph={graph} previousGraph={previousGraph} onShowAffected={showAffectedContracts} />
         ) : (
           <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-neutral-500">
             Loading graph…

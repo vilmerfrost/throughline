@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import { Project } from 'ts-morph';
-import type { ColumnUsage, GraphNode } from '@throughline/core';
+import type { ColumnUsage, GraphNode, SqlViewRead } from '@throughline/core';
 import { computeColumnUsage } from './columnUsage.js';
 
 // ---------------------------------------------------------------------------
@@ -22,17 +22,17 @@ function contract(table: string, columns: string[]): GraphNode {
   };
 }
 
-function runFiles(files: Record<string, string>, contracts: GraphNode[]) {
+function runFiles(files: Record<string, string>, contracts: GraphNode[], sqlViewReads: SqlViewRead[] = []) {
   const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { jsx: 4 } });
   for (const [name, code] of Object.entries(files)) project.createSourceFile(name, code);
-  const byTable = computeColumnUsage('/repo', contracts, project);
+  const byTable = computeColumnUsage('/repo', contracts, project, sqlViewReads);
   const out = new Map<string, Map<string, ColumnUsage>>();
   for (const [table, usages] of byTable) out.set(table, new Map(usages.map((u) => [u.column, u])));
   return out;
 }
 
-function run(code: string, contracts: GraphNode[]) {
-  return runFiles({ 'src/fixture.tsx': code }, contracts);
+function run(code: string, contracts: GraphNode[], sqlViewReads: SqlViewRead[] = []) {
+  return runFiles({ 'src/fixture.tsx': code }, contracts, sqlViewReads);
 }
 
 test('typed single-row column accessed inside JSX → ui_shown', () => {
@@ -175,6 +175,55 @@ test('table never read in TS at all → never_read', () => {
   const t = run(code, [contract('t', ['id', 'x'])]).get('t')!;
   assert.equal(t.get('id')!.reach, 'never_read');
   assert.equal(t.get('x')!.reach, 'never_read');
+});
+
+test('SQL view column read turns an otherwise unread column into server_only', () => {
+  const code = `
+    async function w(sb: any) {
+      await sb.from('t').insert({ id: 1 });
+    }
+  `;
+  const viewRead: SqlViewRead = {
+    viewName: 'v_t',
+    table: 't',
+    columns: ['id'],
+    confidence: 'certain',
+    source: {
+      language: 'sql',
+      filePath: 'supabase/migrations/001.sql',
+      startLine: 10,
+      endLine: 12,
+      snippet: 'create view v_t as select id from t;',
+    },
+  };
+  const t = run(code, [contract('t', ['id', 'x'])], [viewRead]).get('t')!;
+  assert.equal(t.get('id')!.reach, 'server_only');
+  assert.equal(t.get('x')!.reach, 'never_read');
+});
+
+test('opaque SQL view table read prevents never_read for every column it may read', () => {
+  const code = `
+    async function w(sb: any) {
+      await sb.from('t').insert({ id: 1 });
+    }
+  `;
+  const viewRead: SqlViewRead = {
+    viewName: 'v_t_complex',
+    table: 't',
+    confidence: 'opaque',
+    note: 'View reads this table but columns could not be attributed.',
+    source: {
+      language: 'sql',
+      filePath: 'supabase/migrations/001.sql',
+      startLine: 10,
+      endLine: 18,
+      snippet: 'create view v_t_complex as with x as (...) select * from x;',
+    },
+  };
+  const t = run(code, [contract('t', ['id', 'x'])], [viewRead]).get('t')!;
+  assert.equal(t.get('id')!.reach, 'unknown');
+  assert.equal(t.get('x')!.reach, 'unknown');
+  assert.ok((t.get('id')!.escapeTrail?.length ?? 0) >= 1);
 });
 
 test('cross-file: typed rows returned from a lib and rendered in a page → ui_shown', () => {

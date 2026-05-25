@@ -13,7 +13,7 @@ import { detectDrift } from './drift/detect.js';
 export async function buildGraph(repoPath: string): Promise<Graph> {
   // FK-A1 (additive): one SQL pass yields both the contract nodes and the
   // declared FK relationships between them.
-  const { nodes: sqlNodes, relationships } = await parseSchema(repoPath);
+  const { nodes: sqlNodes, relationships, sqlViewReads } = await parseSchema(repoPath);
   // One ts-morph Project per run, shared by the TS analyzers (parseTs builds
   // touches; computeColumnUsage derives per-column read verdicts) so type
   // resolution is paid for once.
@@ -26,7 +26,7 @@ export async function buildGraph(repoPath: string): Promise<Graph> {
   const edges = [...tsResult.edges, ...shallowResult.edges];
 
   // Additive, non-breaking: attach column-level read usage to contract nodes.
-  const columnUsage = computeColumnUsage(repoPath, sqlNodes, project);
+  const columnUsage = computeColumnUsage(repoPath, sqlNodes, project, sqlViewReads);
   for (const node of sqlNodes) {
     const usage = columnUsage.get(node.label);
     if (usage) node.columnUsage = usage;
@@ -50,8 +50,11 @@ export async function buildGraph(repoPath: string): Promise<Graph> {
     // touches, ranked biggest-lever-first. Computed by the TS analyzer; nothing
     // else touched.
     rootCauses: tsResult.rootCauses,
+    helperAliases: tsResult.helperAliases,
     // FK-A1 (additive): declared foreign-key relationships, contract→contract.
     relationships,
+    // SQL view reads (additive): grounded read evidence from migration views.
+    sqlViewReads,
     generatedAt: new Date().toISOString(),
   };
 }

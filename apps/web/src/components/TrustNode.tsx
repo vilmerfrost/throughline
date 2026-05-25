@@ -24,7 +24,7 @@ function TrustNodeBase({ data, selected }: NodeProps) {
 
   return (
     <div
-      className={`w-[220px] rounded-md border ${toneBorderClass(tone)} bg-node px-3 py-2 text-left backdrop-blur-sm`}
+      className={`w-[220px] rounded-md border ${toneBorderClass(tone)} bg-node px-3 py-2 text-left shadow-elev1 backdrop-blur-sm`}
       style={selected ? { boxShadow: `0 0 0 2px ${color}` } : undefined}
     >
       {/* Handles: hidden until a connection is dragged, color-matched to border. */}

@@ -202,3 +202,33 @@ export function langTag(language?: string): string {
   if (language === 'python') return 'PY';
   return language.toUpperCase();
 }
+
+// Full, human-readable language name for headers that have room for it
+// (e.g. focus-view touch cards read "TypeScript read"). Falls back to the
+// short tag's casing for anything we don't special-case.
+export function langName(language?: string): string {
+  if (!language) return '';
+  if (language === 'typescript') return 'TypeScript';
+  if (language === 'python') return 'Python';
+  if (language === 'rust') return 'Rust';
+  if (language === 'sql') return 'SQL';
+  if (language === 'json') return 'JSON';
+  return language.charAt(0).toUpperCase() + language.slice(1);
+}
+
+// Visual-WEIGHT axis for hierarchy emphasis. Mismatch / asserted / dark get
+// more pixel-weight (thicker border, brighter text, larger dot); verified
+// recedes. Color is unchanged — this only steers what the eye lands on first,
+// so the WORST verdict in a view always pops against a sea of gray.
+//
+// Critical = mismatch (the most alarming verdict).
+// Attention = dark / asserted (silently wrong or unchecked).
+// Okay = narrowed / aligned (partial-but-honest verdicts).
+// Quiet = verified / untouched (the eye should drift past these).
+export type Weight = 'critical' | 'attention' | 'okay' | 'quiet';
+export function verdictWeight(verdict: Verdict | null | undefined): Weight {
+  if (verdict === 'mismatch') return 'critical';
+  if (verdict === 'dark' || verdict === 'asserted') return 'attention';
+  if (verdict === 'narrowed' || verdict === 'aligned') return 'okay';
+  return 'quiet'; // verified or null/undefined
+}

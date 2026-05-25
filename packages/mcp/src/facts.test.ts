@@ -29,6 +29,7 @@ test('touchFact: carries nodeId, trust, reason text, confidence, scope, source',
   assert.match(f.reasonDescription, /Python is shallow-grep only/);
   assert.equal(f.confidence, 'heuristic');
   assert.deepEqual(f.scope, { level: 'table', depth: 'shallow' });
+  assert.equal(f.sourceScope, 'script');
   assert.equal(f.source?.filePath, 'scripts/seed.py');
 });
 
@@ -65,6 +66,20 @@ test('getTableFacts: found table reports columns with reach, touches, drift, fk'
   assert.equal(t.scope.level, 'table');
 });
 
+test('getTableFacts: scope filter excludes other touches and reports excluded counts', () => {
+  const t = getTableFacts('batches', sampleGraph, { scope: 'production' });
+  assert.equal(t.touches.readers.length, 1);
+  assert.equal(t.touches.writers.length, 0);
+  assert.deepEqual(t.excludedTouches, { script: 1 });
+});
+
+test('getTableFacts: all scope groups touches by source scope', () => {
+  const t = getTableFacts('batches', sampleGraph, { scope: 'all' });
+  assert.deepEqual(Object.keys(t.touchesByScope ?? {}).sort(), ['production', 'script']);
+  assert.equal(t.touchesByScope?.production?.readers.length, 1);
+  assert.equal(t.touchesByScope?.script?.writers.length, 1);
+});
+
 test('getTableFacts: unknown table returns found:false but still carries analyzed_at', () => {
   const t = getTableFacts('does_not_exist', sampleGraph);
   assert.equal(t.found, false);
@@ -80,6 +95,12 @@ test('getFileFacts: relative path returns its touches with tables touched', () =
   assert.equal(f.touches[0].nodeId, 'touch:python:scripts/seed.py:3:batches');
   assert.deepEqual(f.touches[0].tablesTouched, ['batches']);
   assert.equal(f.touches[0].direction, 'write');
+});
+
+test('getFileFacts: scope filter can exclude a file touch', () => {
+  const f = getFileFacts('scripts/seed.py', sampleGraph, { scope: 'production' });
+  assert.equal(f.found, false);
+  assert.equal(f.touches.length, 0);
 });
 
 test('getFileFacts: absolute path under repoPath is normalized', () => {
@@ -177,4 +198,11 @@ test('getRootCauseFacts: passes through ranked levers with reason description + 
   assert.deepEqual(lever.affectedContracts, ['batches']);
   assert.equal(lever.evidence?.length, 1);
   assert.equal(lever.confidence, 'certain'); // deterministic rollup of resolved facts
+  assert.deepEqual(lever.scopeBreakdown, { production: 1 });
+  assert.equal(lever.productionImpact, true);
+});
+
+test('getRootCauseFacts: scope filter keeps only matching affected touches', () => {
+  const rc = getRootCauseFacts(sampleGraph, { scope: 'test' });
+  assert.equal(rc.rootCauses.length, 0);
 });

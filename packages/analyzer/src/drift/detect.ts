@@ -5,6 +5,7 @@ import type {
   GraphNode,
   Language,
   SourceRef,
+  SourceScope,
   Trust,
 } from '@throughline/core';
 
@@ -25,6 +26,7 @@ interface Touch {
   language: Language;
   direction: EdgeDirection;
   trust: Trust;
+  sourceScope?: SourceScope;
   source?: SourceRef;
 }
 
@@ -76,6 +78,7 @@ function groupTouches(touches: GraphNode[], edges: GraphEdge[]): Map<string, Tou
       language: node.language,
       direction: edge.direction,
       trust: node.trust,
+      sourceScope: node.sourceScope,
       source: node.source,
     });
     byContract.set(edge.target, list);
@@ -128,11 +131,19 @@ function evaluateContract(contract: GraphNode, touches: Touch[]): DriftFinding |
 
   // 3. ALL-DARK WRITES — every write is type-blind.
   if (writes.length > 0 && writes.every((w) => w.trust === 'dark')) {
+    const scopes = scopeBreakdown(writes);
+    const testOnly = isTestOnly(scopes);
+    const productionImpact = hasProduction(scopes);
     return finding(
       contract,
       'info',
-      `Every write to \`${table}\` is type-blind — no writer carries the schema type.`,
+      testOnly
+        ? `Test-only direct writes to \`${table}\` are type-blind — no production write is directly traced.`
+        : `Every directly traced write to \`${table}\` is type-blind — no writer carries the schema type.`,
       writes[0]?.source,
+      scopes,
+      productionImpact,
+      testOnly,
     );
   }
 
@@ -178,9 +189,20 @@ function finding(
   severity: DriftFinding['severity'],
   message: string,
   source: SourceRef | undefined,
+  scopes?: Partial<Record<SourceScope, number>>,
+  productionImpact?: boolean,
+  testOnly?: boolean,
 ): DriftFinding | null {
   if (!source) return null;
-  return { contractId: contract.id, message, severity, source };
+  return {
+    contractId: contract.id,
+    message,
+    severity,
+    source,
+    ...(scopes ? { scopeBreakdown: scopes } : {}),
+    ...(productionImpact !== undefined ? { productionImpact } : {}),
+    ...(testOnly !== undefined ? { testOnly } : {}),
+  };
 }
 
 function langSet(touches: Touch[]): Set<Language> {
@@ -189,6 +211,23 @@ function langSet(touches: Touch[]): Set<Language> {
 
 function joinLangs(langs: Set<Language>): string {
   return [...langs].sort().join(' + ');
+}
+
+function scopeBreakdown(touches: Touch[]): Partial<Record<SourceScope, number>> {
+  const out: Partial<Record<SourceScope, number>> = {};
+  for (const t of touches) {
+    const scope = t.sourceScope ?? 'unknown';
+    out[scope] = (out[scope] ?? 0) + 1;
+  }
+  return out;
+}
+
+function hasProduction(scopes: Partial<Record<SourceScope, number>>): boolean {
+  return (scopes.production ?? 0) > 0;
+}
+
+function isTestOnly(scopes: Partial<Record<SourceScope, number>>): boolean {
+  return Object.keys(scopes).length === 1 && (scopes.test ?? 0) > 0;
 }
 
 function tally<T>(items: T[], key: (item: T) => string): Record<string, number> {

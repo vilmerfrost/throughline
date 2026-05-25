@@ -13,6 +13,7 @@ import {
   type DriftFinding,
   type EdgeDirection,
   type RootCause,
+  type SourceScope,
   type UnresolvedShape,
 } from '@throughline/core';
 import { compareWriteFields } from '@throughline/analyzer/schema/compareFields';
@@ -50,6 +51,7 @@ export interface TouchFact {
   schemaMatch?: SchemaMatch;
   confidence: Confidence;
   scope: Scope;
+  sourceScope?: SourceScope;
   source?: SourceRef;
 }
 
@@ -66,8 +68,15 @@ export function touchFact(node: GraphNode): TouchFact {
     schemaMatch: node.schemaMatch,
     confidence: confidenceForNode(node),
     scope: { level: 'table', depth: depthForNode(node) },
+    sourceScope: node.sourceScope,
     source: node.source,
   };
+}
+
+export type SourceScopeFilter = SourceScope | 'all';
+export interface FactFilter {
+  scope?: SourceScopeFilter;
+  includeTests?: boolean;
 }
 
 // --- shared lookups -------------------------------------------------------
@@ -85,17 +94,24 @@ function isKnownContract(graph: Graph, table: string): boolean {
 function touchesForContract(
   graph: Graph,
   contractId: string,
-): { readers: GraphNode[]; writers: GraphNode[] } {
+  filter: FactFilter = {},
+): { readers: GraphNode[]; writers: GraphNode[]; excludedTouches: Partial<Record<SourceScope, number>> } {
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const readers: GraphNode[] = [];
   const writers: GraphNode[] = [];
+  const excludedTouches: Partial<Record<SourceScope, number>> = {};
   for (const e of graph.edges) {
     if (e.target !== contractId) continue;
     const touch = byId.get(e.source);
     if (!touch) continue;
+    if (!matchesFilter(touch, filter)) {
+      const scope = touch.sourceScope ?? 'unknown';
+      excludedTouches[scope] = (excludedTouches[scope] ?? 0) + 1;
+      continue;
+    }
     (e.direction === 'write' ? writers : readers).push(touch);
   }
-  return { readers, writers };
+  return { readers, writers, excludedTouches };
 }
 
 // --- FK neighbors ---------------------------------------------------------
@@ -159,6 +175,9 @@ export interface DriftFact {
   message: string;
   severity: DriftFinding['severity'];
   source: SourceRef;
+  scopeBreakdown?: Partial<Record<SourceScope, number>>;
+  productionImpact?: boolean;
+  testOnly?: boolean;
 }
 
 export interface TableFacts {
@@ -167,12 +186,14 @@ export interface TableFacts {
   analyzed_at: string;
   columns: ColumnFact[];
   touches: { writers: TouchFact[]; readers: TouchFact[] };
+  touchesByScope?: Partial<Record<SourceScope, { writers: TouchFact[]; readers: TouchFact[] }>>;
+  excludedTouches?: Partial<Record<SourceScope, number>>;
   drift: DriftFact[];
   fkNeighbors: FkNeighbor[];
   scope: { level: 'table' };
 }
 
-export function getTableFacts(name: string, graph: Graph): TableFacts {
+export function getTableFacts(name: string, graph: Graph, filter: FactFilter = {}): TableFacts {
   const contract = contractNode(graph, name);
   const base: TableFacts = {
     table: name,
@@ -206,13 +227,24 @@ export function getTableFacts(name: string, graph: Graph): TableFacts {
     };
   });
 
-  const { readers, writers } = touchesForContract(graph, contract.id);
+  const { readers, writers, excludedTouches } = touchesForContract(graph, contract.id, filter);
   base.touches.readers = readers.map(touchFact);
   base.touches.writers = writers.map(touchFact);
+  if (Object.keys(excludedTouches).length > 0) base.excludedTouches = excludedTouches;
+  if ((filter.scope ?? 'all') === 'all') {
+    base.touchesByScope = groupTouchesByScope(writers, readers);
+  }
 
   base.drift = graph.drift
     .filter((d) => d.contractId === contract.id)
-    .map((d) => ({ message: d.message, severity: d.severity, source: d.source }));
+    .map((d) => ({
+      message: d.message,
+      severity: d.severity,
+      source: d.source,
+      scopeBreakdown: d.scopeBreakdown,
+      productionImpact: d.productionImpact,
+      testOnly: d.testOnly,
+    }));
 
   return base;
 }
@@ -237,7 +269,7 @@ function toRelative(graph: Graph, p: string): string {
   return p.startsWith(root) ? p.slice(root.length) : p;
 }
 
-export function getFileFacts(path: string, graph: Graph): FileFacts {
+export function getFileFacts(path: string, graph: Graph, filter: FactFilter = {}): FileFacts {
   const rel = toRelative(graph, path);
   const labelById = new Map(graph.nodes.map((n) => [n.id, n.label]));
   const edgesBySource = new Map<string, typeof graph.edges>();
@@ -249,6 +281,7 @@ export function getFileFacts(path: string, graph: Graph): FileFacts {
 
   const touches: FileTouchFact[] = graph.nodes
     .filter((n) => n.kind === 'touch' && n.source?.filePath === rel)
+    .filter((n) => matchesFilter(n, filter))
     .map((n) => {
       const edges = edgesBySource.get(n.id) ?? [];
       const tablesTouched = [
@@ -342,6 +375,9 @@ export interface RootCauseFact {
   affectedTouchIds: string[];
   affectedContracts: string[];
   evidence?: SourceRef[];
+  scopeBreakdown?: Partial<Record<SourceScope, number>>;
+  productionImpact?: boolean;
+  testOnly?: boolean;
   // The rollup is a deterministic grouping of already-resolved analyzer facts,
   // so the lever itself is certain. (Individual touches keep their own.)
   confidence: Confidence;
@@ -352,21 +388,75 @@ export interface RootCauseFacts {
   rootCauses: RootCauseFact[];
 }
 
-export function getRootCauseFacts(graph: Graph): RootCauseFacts {
+export function getRootCauseFacts(graph: Graph, filter: FactFilter = {}): RootCauseFacts {
   const ranked: RootCause[] = graph.rootCauses ?? [];
+  const touchById = new Map(graph.nodes.map((n) => [n.id, n]));
   return {
     analyzed_at: graph.generatedAt,
-    rootCauses: ranked.map((rc) => ({
-      reason: rc.reason,
-      reasonDescription: TRUST_REASON_DESCRIPTIONS[rc.reason],
-      origin: { name: rc.origin.name, shape: rc.origin.shape, source: rc.origin.source },
-      affectedCount: rc.affectedCount,
-      affectedTouchIds: rc.affectedTouchIds,
-      affectedContracts: rc.affectedContracts,
-      evidence: rc.evidence,
-      confidence: 'certain',
-    })),
+    rootCauses: ranked.flatMap((rc) => {
+      const scopedTouchIds = rc.affectedTouchIds.filter((id) => {
+        const node = touchById.get(id);
+        return node ? matchesFilter(node, filter) : true;
+      });
+      if (scopedTouchIds.length === 0) return [];
+      const scopedContracts = new Set<string>();
+      for (const edge of graph.edges) {
+        if (!scopedTouchIds.includes(edge.source)) continue;
+        const contract = graph.nodes.find((n) => n.id === edge.target && n.kind === 'contract');
+        if (contract) scopedContracts.add(contract.label);
+      }
+      const scopeBreakdown = breakdownScopes(scopedTouchIds.map((id) => touchById.get(id)).filter(Boolean) as GraphNode[]);
+      return [{
+        reason: rc.reason,
+        reasonDescription: TRUST_REASON_DESCRIPTIONS[rc.reason],
+        origin: { name: rc.origin.name, shape: rc.origin.shape, source: rc.origin.source },
+        affectedCount: scopedTouchIds.length,
+        affectedTouchIds: scopedTouchIds,
+        affectedContracts: [...scopedContracts].sort(),
+        evidence: rc.evidence,
+        scopeBreakdown,
+        productionImpact: (scopeBreakdown.production ?? 0) > 0,
+        testOnly: Object.keys(scopeBreakdown).length === 1 && (scopeBreakdown.test ?? 0) > 0,
+        confidence: 'certain' as const,
+      }];
+    }),
   };
+}
+
+function matchesFilter(node: GraphNode, filter: FactFilter): boolean {
+  if (filter.includeTests === false && node.sourceScope === 'test') return false;
+  const scope = filter.scope ?? 'all';
+  if (scope === 'all') return true;
+  return (node.sourceScope ?? 'unknown') === scope;
+}
+
+function groupTouchesByScope(
+  writers: GraphNode[],
+  readers: GraphNode[],
+): Partial<Record<SourceScope, { writers: TouchFact[]; readers: TouchFact[] }>> {
+  const out: Partial<Record<SourceScope, { writers: TouchFact[]; readers: TouchFact[] }>> = {};
+  for (const node of writers) {
+    const scope = node.sourceScope ?? 'unknown';
+    const slot = out[scope] ?? { writers: [], readers: [] };
+    slot.writers.push(touchFact(node));
+    out[scope] = slot;
+  }
+  for (const node of readers) {
+    const scope = node.sourceScope ?? 'unknown';
+    const slot = out[scope] ?? { writers: [], readers: [] };
+    slot.readers.push(touchFact(node));
+    out[scope] = slot;
+  }
+  return out;
+}
+
+function breakdownScopes(nodes: GraphNode[]): Partial<Record<SourceScope, number>> {
+  const out: Partial<Record<SourceScope, number>> = {};
+  for (const node of nodes) {
+    const scope = node.sourceScope ?? 'unknown';
+    out[scope] = (out[scope] ?? 0) + 1;
+  }
+  return out;
 }
 
 // --- check_write (preventive, PURE) -----------------------------------------

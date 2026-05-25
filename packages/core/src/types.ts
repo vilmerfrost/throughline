@@ -18,6 +18,11 @@ export interface SourceRef {
 
 export type NodeKind = 'contract' | 'touch' | 'boundary';
 
+// Where a source-grounded fact lives in the repository. This is a separate axis
+// from analyzer confidence/trust: a dark touch in tests is real evidence, but it
+// should not be summarized as production risk.
+export type SourceScope = 'production' | 'test' | 'migration' | 'script' | 'generated' | 'unknown';
+
 // verified (green):  inferred type, no cast — genuinely connected
 // narrowed (yellow): Pick/Omit or partial column select — fields dropped
 // asserted (red):    an `as X` cast — "trust me", NOT verified
@@ -130,6 +135,25 @@ export interface ColumnUsage {
   escapeTrail?: SourceRef[]; // for `unknown`: the reference chain up to where the trace was lost
 }
 
+// SQL view read evidence extracted from migration `CREATE VIEW` statements.
+// This is deliberately separate from TypeScript reach: a view read proves the DB
+// computes/serves a value server-side, but it does NOT prove a user sees it.
+//
+// certain  columns were attributed to a known base table (`t.col`, `t.*`, or a
+//          single-table `*` expanded against the known schema at that migration)
+// opaque   the view reads the table, but columns could not be attributed honestly
+//          (CTE/subquery/ambiguous star/etc.). Opaque reads prevent "no reader"
+//          claims but never become precise column claims.
+export type SqlViewReadConfidence = 'certain' | 'opaque';
+export interface SqlViewRead {
+  viewName: string;
+  table: string;
+  confidence: SqlViewReadConfidence;
+  columns?: string[]; // present only for confidence === 'certain'
+  source: SourceRef;
+  note?: string;
+}
+
 export interface GraphNode {
   id: string;
   kind: NodeKind;
@@ -140,6 +164,7 @@ export interface GraphNode {
   trust?: Trust; // touch/boundary nodes
   trustReason?: TrustReason; // why the analyzer chose this trust level
   schemaMatch?: SchemaMatch; // Stage 1a (additive): deep-parsed write touches only — struct-vs-schema verdict, separate from `trust`
+  sourceScope?: SourceScope; // touch/boundary nodes: production/test/migration/script/generated/unknown
   source?: SourceRef; // grounds the node in real code
   notes?: string; // short "what this does" explanation
 }
@@ -161,6 +186,9 @@ export interface DriftFinding {
   message: string;
   severity: 'info' | 'warn' | 'error';
   source: SourceRef;
+  scopeBreakdown?: Partial<Record<SourceScope, number>>;
+  productionImpact?: boolean;
+  testOnly?: boolean;
 }
 
 // RC-a (ADDITIVE): WHY an 'unresolved-origin' touch couldn't be traced to a
@@ -196,6 +224,9 @@ export interface RootCause {
   affectedCount: number; // how many touches this root cause explains (== affectedTouchIds.length)
   affectedTouchIds: string[]; // the touch node ids it explains
   affectedContracts: string[]; // the contract (table) labels those touches hit
+  scopeBreakdown?: Partial<Record<SourceScope, number>>;
+  productionImpact?: boolean;
+  testOnly?: boolean;
   // RC-a addendum (additive): a capped sample of real grounding refs for an
   // 'unresolved-origin' group — e.g. function signatures for the 'parameter'
   // shape, so the fix site is visible even when there is no construction site.
@@ -230,6 +261,18 @@ export interface Relationship {
   source: SourceRef; // the migration file:line where this FK is declared
 }
 
+// Simple TypeScript helpers that return a single Supabase table builder, e.g.
+// `adapterRunsTable(admin) { return admin.from('adapter_runs') }`. These aliases
+// let later call sites keep table identity without claiming broad interprocedural
+// analysis.
+export interface TableHelperAlias {
+  functionName: string;
+  table: string;
+  requiresTypedClient: boolean;
+  source: SourceRef;
+  sourceScope?: SourceScope;
+}
+
 export interface Graph {
   repoPath: string;
   nodes: GraphNode[];
@@ -241,5 +284,12 @@ export interface Graph {
   // FK-A1 (additive, optional): declared foreign-key relationships between tables,
   // extracted from the migrations. Connects contract→contract honestly.
   relationships?: Relationship[];
+  // SQL view reads (additive, optional): grounded evidence that migration-defined
+  // views read contract tables/columns. Used to keep reach from overclaiming that
+  // TS-unread columns have no readers.
+  sqlViewReads?: SqlViewRead[];
+  // Simple Supabase table helpers discovered in TypeScript. Optional and
+  // conservative: emitted only for helpers with one obvious table.
+  helperAliases?: TableHelperAlias[];
   generatedAt: string; // ISO 8601
 }

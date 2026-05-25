@@ -10,7 +10,7 @@ import {
   type DataTypeDef,
   type Statement,
 } from 'pgsql-ast-parser';
-import type { ContractColumn, GraphNode, Relationship, SourceRef } from '@throughline/core';
+import type { ContractColumn, GraphNode, Relationship, SourceRef, SqlViewRead } from '@throughline/core';
 
 // Where Supabase keeps migrations. Change this one line to point elsewhere; the
 // directory we scan is the part of the glob before the wildcard.
@@ -49,6 +49,7 @@ export async function parseSql(repoPath: string): Promise<GraphNode[]> {
 export interface Schema {
   nodes: GraphNode[];
   relationships: Relationship[];
+  sqlViewReads: SqlViewRead[];
 }
 
 export async function parseSchema(repoPath: string): Promise<Schema> {
@@ -59,6 +60,7 @@ export async function parseSchema(repoPath: string): Promise<Schema> {
 
   const tables = new Map<string, TableAcc>();
   const rawFks: RawFk[] = [];
+  const sqlViewReads: SqlViewRead[] = [];
   const skipReasons = new Map<string, number>();
   let skipped = 0;
   const note = (reason: string) => {
@@ -86,7 +88,7 @@ export async function parseSchema(repoPath: string): Promise<Schema> {
       }
 
       for (const stmt of statements) {
-        const ctx: ParseCtx = { rel, basename, chunk, lineAt, tables, rawFks, note };
+        const ctx: ParseCtx = { rel, basename, chunk, lineAt, tables, rawFks, sqlViewReads, note };
         applyStatement(stmt, ctx);
       }
     }
@@ -117,7 +119,7 @@ export async function parseSchema(repoPath: string): Promise<Schema> {
     );
   }
 
-  return { nodes, relationships };
+  return { nodes, relationships, sqlViewReads };
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +157,7 @@ interface ParseCtx {
   lineAt: (offset: number) => number;
   tables: Map<string, TableAcc>;
   rawFks: RawFk[];
+  sqlViewReads: SqlViewRead[];
   note: (reason: string) => void;
 }
 
@@ -163,6 +166,8 @@ function applyStatement(stmt: Statement, ctx: ParseCtx): void {
     handleCreate(stmt, ctx);
   } else if (stmt.type === 'alter table') {
     handleAlter(stmt, ctx);
+  } else if (stmt.type === 'create view') {
+    handleCreateView(stmt as CreateViewStatement, ctx);
   } else {
     ctx.note(stmt.type);
   }
@@ -289,6 +294,251 @@ function handleAlter(stmt: AlterTableStatement, ctx: ParseCtx): void {
     const kinds = stmt.changes.map((c) => c.type).join(', ') || 'no-op';
     ctx.note(`alter table (${kinds})`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// SQL view read accumulation
+// ---------------------------------------------------------------------------
+
+type AnyNode = Record<string, unknown>;
+type CreateViewStatement = Statement & {
+  type: 'create view';
+  name: { name: string };
+  query: unknown;
+};
+type SelectFromItem = {
+  type?: string;
+  name?: { name: string; alias?: string };
+};
+type SimpleSelectStatement = {
+  type: 'select';
+  columns?: { expr?: unknown }[];
+  from?: SelectFromItem[];
+};
+
+function handleCreateView(stmt: CreateViewStatement, ctx: ParseCtx): void {
+  const source = sourceFrom(ctx);
+  const viewName = stmt.name.name;
+  const reads = readsFromViewQuery(viewName, stmt.query, ctx.tables, source);
+  if (reads.length === 0) {
+    ctx.note('create view (no attributable table read)');
+    return;
+  }
+  ctx.sqlViewReads.push(...reads);
+}
+
+function readsFromViewQuery(
+  viewName: string,
+  query: unknown,
+  tables: Map<string, TableAcc>,
+  source: SourceRef,
+): SqlViewRead[] {
+  if (isSelect(query)) return readsFromSelect(viewName, query, tables, source);
+
+  // CTEs and nested query shapes can read real base tables while obscuring which
+  // final view columns came from which base columns. Keep the table-level reader
+  // as opaque evidence rather than inventing column precision.
+  return [...collectKnownTableRefs(query, tables)]
+    .sort()
+    .map((table) => opaqueViewRead(viewName, table, source));
+}
+
+function readsFromSelect(
+  viewName: string,
+  query: SimpleSelectStatement,
+  tables: Map<string, TableAcc>,
+  source: SourceRef,
+): SqlViewRead[] {
+  const aliases = tableAliases(query, tables);
+  if (aliases.size === 0) return [];
+
+  const certain = new Map<string, Set<string>>();
+  const opaque = new Set<string>();
+  const addCol = (table: string, column: string) => {
+    const acc = tables.get(table);
+    if (!acc?.columns.has(column)) return;
+    const cols = certain.get(table) ?? new Set<string>();
+    cols.add(column);
+    certain.set(table, cols);
+  };
+  const addAll = (table: string) => {
+    const acc = tables.get(table);
+    if (!acc) return;
+    certain.set(table, new Set(acc.columns.keys()));
+  };
+
+  for (const col of query.columns ?? []) {
+    const expr = (col as { expr?: unknown }).expr;
+    if (!isRef(expr)) {
+      addExpressionRefs(expr, aliases, tables, addCol, opaque);
+      continue;
+    }
+
+    const name = stringProp(expr, 'name');
+    const qualifier = refTableName(expr);
+    if (name === '*') {
+      if (qualifier) {
+        const table = aliases.get(qualifier);
+        if (table) addAll(table);
+      } else if (uniqueAliasTargets(aliases).length === 1) {
+        addAll(uniqueAliasTargets(aliases)[0]);
+      } else {
+        for (const table of uniqueAliasTargets(aliases)) opaque.add(table);
+      }
+      continue;
+    }
+
+    if (qualifier) {
+      const table = aliases.get(qualifier);
+      if (table) addCol(table, name);
+      continue;
+    }
+
+    const possible = [...new Set(aliases.values())].filter((table) => tables.get(table)?.columns.has(name));
+    if (possible.length === 1) {
+      addCol(possible[0], name);
+    } else {
+      for (const table of possible) opaque.add(table);
+    }
+  }
+
+  addExpressionRefs(query.from, aliases, tables, addCol, opaque);
+  addExpressionRefs((query as AnyNode).where, aliases, tables, addCol, opaque);
+
+  return [
+    ...[...certain.entries()]
+      .filter(([, cols]) => cols.size > 0)
+      .map(([table, cols]) => ({
+        viewName,
+        table,
+        confidence: 'certain' as const,
+        columns: [...cols],
+        source,
+        note: `SQL view \`${viewName}\` reads these columns.`,
+      })),
+    ...[...opaque].sort().map((table) => opaqueViewRead(viewName, table, source)),
+  ];
+}
+
+function addExpressionRefs(
+  node: unknown,
+  aliases: Map<string, string>,
+  tables: Map<string, TableAcc>,
+  addCol: (table: string, column: string) => void,
+  opaque: Set<string>,
+) {
+  for (const ref of collectRefs(node)) {
+    const name = stringProp(ref, 'name');
+    if (!name || name === '*') continue;
+    const qualifier = refTableName(ref);
+    if (qualifier) {
+      const table = aliases.get(qualifier);
+      if (table) addCol(table, name);
+      continue;
+    }
+    const possible = [...new Set(aliases.values())].filter((table) => tables.get(table)?.columns.has(name));
+    if (possible.length === 1) addCol(possible[0], name);
+    else for (const table of possible) opaque.add(table);
+  }
+}
+
+function collectRefs(node: unknown): AnyNode[] {
+  const refs: AnyNode[] = [];
+  const visit = (cur: unknown) => {
+    if (!cur || typeof cur !== 'object') return;
+    const obj = cur as AnyNode;
+    if (obj.type === 'ref') refs.push(obj);
+    for (const value of Object.values(obj)) {
+      if (Array.isArray(value)) for (const item of value) visit(item);
+      else visit(value);
+    }
+  };
+  visit(node);
+  return refs;
+}
+
+function tableAliases(query: SimpleSelectStatement, tables: Map<string, TableAcc>): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (const item of (query.from ?? []) as SelectFromItem[]) {
+    if (item.type !== 'table' || !item.name) continue;
+    const table = item.name.name;
+    if (!tables.has(table)) continue;
+    aliases.set(table, table);
+    if (item.name.alias) aliases.set(item.name.alias, table);
+  }
+  return aliases;
+}
+
+function uniqueAliasTargets(aliases: Map<string, string>): string[] {
+  return [...new Set(aliases.values())];
+}
+
+function opaqueViewRead(viewName: string, table: string, source: SourceRef): SqlViewRead {
+  return {
+    viewName,
+    table,
+    confidence: 'opaque',
+    source,
+    note: `SQL view \`${viewName}\` reads \`${table}\`, but Throughline could not attribute columns.`,
+  };
+}
+
+function collectKnownTableRefs(
+  node: unknown,
+  tables: Map<string, TableAcc>,
+  aliases: Map<string, string> = new Map(),
+): Set<string> {
+  const out = new Set<string>();
+  const visit = (cur: unknown) => {
+    if (!cur || typeof cur !== 'object') return;
+    const obj = cur as AnyNode;
+
+    if (obj.type === 'table' && isName(obj.name)) {
+      const table = obj.name.name;
+      if (tables.has(table)) out.add(table);
+    }
+    if (obj.type === 'ref') {
+      const table = refTableName(obj);
+      if (table) {
+        const resolved = aliases.get(table) ?? table;
+        if (tables.has(resolved)) out.add(resolved);
+      }
+    }
+
+    for (const value of Object.values(obj)) {
+      if (Array.isArray(value)) for (const item of value) visit(item);
+      else visit(value);
+    }
+  };
+  visit(node);
+  return out;
+}
+
+function isSelect(node: unknown): node is SimpleSelectStatement {
+  return (
+    !!node &&
+    typeof node === 'object' &&
+    (node as { type?: unknown }).type === 'select' &&
+    Array.isArray((node as { columns?: unknown }).columns)
+  );
+}
+
+function isRef(node: unknown): node is AnyNode {
+  return !!node && typeof node === 'object' && (node as { type?: unknown }).type === 'ref';
+}
+
+function isName(node: unknown): node is { name: string; alias?: string } {
+  return !!node && typeof node === 'object' && typeof (node as { name?: unknown }).name === 'string';
+}
+
+function refTableName(ref: AnyNode): string | undefined {
+  const table = ref.table;
+  return isName(table) ? table.name : undefined;
+}
+
+function stringProp(obj: AnyNode, key: string): string {
+  const value = obj[key];
+  return typeof value === 'string' ? value : '';
 }
 
 // FK-A1: turn the raw FK declarations into Relationships once every table is

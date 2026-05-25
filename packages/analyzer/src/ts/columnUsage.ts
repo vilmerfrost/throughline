@@ -6,9 +6,10 @@ import {
   type Project,
   type SourceFile,
 } from 'ts-morph';
-import type { ColumnUsage, ColumnUsageVerdict, GraphNode, SourceRef } from '@throughline/core';
-import { loadProject } from './parseTs.js';
+import type { ColumnUsage, ColumnUsageVerdict, GraphNode, SourceRef, SqlViewRead } from '@throughline/core';
+import { isTypedClient, loadProject } from './parseTs.js';
 import { computeReach, type ReachResult } from './reach.js';
+import { collectTableHelperAliases, findTableAccesses, type TableAccess } from './tableHelpers.js';
 
 // ---------------------------------------------------------------------------
 // Column-level read-usage analysis (TypeScript only).
@@ -48,6 +49,9 @@ type AccessKind = 'jsx' | 'code';
 interface TableAcc {
   columns: Set<string>;
   explicit: Map<string, SourceRef[]>; // col -> select sites that name it
+  sqlViewExplicit: Map<string, SourceRef[]>; // col -> SQL view sites that prove a DB-side read
+  sqlViewNames: Map<string, Set<string>>; // col -> view names for notes
+  sqlViewOpaque: SourceRef[]; // SQL view reads this table but columns are opaque
   starAccess: Map<string, { jsx: SourceRef[]; code: SourceRef[] }>; // col -> access sites
   starEscapes: SourceRef[]; // `*` reads whose result we could not follow
   starReadSites: SourceRef[]; // `*` reads we DID fully inspect (for likely_dead context)
@@ -61,6 +65,7 @@ export function computeColumnUsage(
   repoPath: string,
   contracts: GraphNode[],
   project: Project = loadProject(repoPath),
+  sqlViewReads: SqlViewRead[] = [],
 ): Map<string, ColumnUsage[]> {
   const tables = new Map<string, TableAcc>();
   for (const c of contracts) {
@@ -68,6 +73,9 @@ export function computeColumnUsage(
     tables.set(c.label, {
       columns: new Set(c.columns.map((col) => col.name)),
       explicit: new Map(),
+      sqlViewExplicit: new Map(),
+      sqlViewNames: new Map(),
+      sqlViewOpaque: [],
       starAccess: new Map(),
       starEscapes: [],
       starReadSites: [],
@@ -77,15 +85,22 @@ export function computeColumnUsage(
   }
   if (tables.size === 0) return new Map();
 
+  applySqlViewUsage(tables, sqlViewReads);
+  const helperAliases = collectTableHelperAliases(
+    project,
+    repoPath,
+    new Set(tables.keys()),
+    isTypedClient,
+    resolveTableArg,
+  );
+
   for (const sf of project.getSourceFiles()) {
     if (EXCLUDE.test(sf.getFilePath())) continue;
     try {
-      for (const fromCall of findFromCalls(sf)) {
-        const table = resolveTableName(fromCall.getArguments()[0]);
-        if (!table) continue;
-        const acc = tables.get(table);
+      for (const access of findTableAccesses(sf, helperAliases, resolveTableArg)) {
+        const acc = tables.get(access.table);
         if (!acc) continue; // not a contract we know
-        analyzeRead(fromCall, acc, repoPath, sf);
+        analyzeRead(access, acc, repoPath, sf);
       }
     } catch {
       // A malformed file must never sink the whole analysis; skip it.
@@ -94,7 +109,7 @@ export function computeColumnUsage(
 
   // The reach axis (B1): WHERE each column's value travels, traced cross-file via
   // findReferences. Computed in a separate pass that shares this same Project.
-  const reachByTable = computeReach(repoPath, contracts, project);
+  const reachByTable = computeReach(repoPath, contracts, project, sqlViewReads);
 
   const out = new Map<string, ColumnUsage[]>();
   for (const [table, acc] of tables) {
@@ -110,14 +125,15 @@ export function computeColumnUsage(
 // Per-read analysis: classify one `.from('table')…` chain.
 // ---------------------------------------------------------------------------
 
-function analyzeRead(fromCall: CallExpression, acc: TableAcc, repoPath: string, sf: SourceFile) {
-  const chain = walkChain(fromCall);
+function analyzeRead(access: TableAccess, acc: TableAcc, repoPath: string, sf: SourceFile) {
+  const chain = walkChain(access.rootCall);
   if (chain.isWrite) return; // reads only
 
   if (chain.explicitColumns) {
+    if (!access.alias && isBareReturnedBuilder(access.rootCall, chain)) return;
     // EXPLICIT SELECT — these columns are CERTAIN. Explicit beats everything.
     acc.explicitReadCount += 1;
-    const site = refFrom(chain.selectCall ?? fromCall, repoPath, sf);
+    const site = refFrom(chain.selectCall ?? access.rootCall, repoPath, sf);
     for (const col of chain.explicitColumns) {
       if (!acc.columns.has(col)) continue;
       push(acc.explicit, col, site);
@@ -126,32 +142,33 @@ function analyzeRead(fromCall: CallExpression, acc: TableAcc, repoPath: string, 
   }
 
   // Otherwise this is a `select('*')` (or no/`*` select) read.
+  if (!access.alias && isBareReturnedBuilder(access.rootCall, chain)) return;
   acc.starReadCount += 1;
   const rows = resolveRows(chain);
 
   if (rows.kind === 'directAccess') {
     // `const { data: { id, name } } = await …` — columns destructured straight off.
-    acc.starReadSites.push(refFrom(fromCall, repoPath, sf));
+    acc.starReadSites.push(refFrom(access.rootCall, repoPath, sf));
     for (const a of rows.accesses) {
       if (acc.columns.has(a.column)) recordAccess(acc, a.column, 'code', refFrom(a.ref, repoPath, sf));
     }
     return;
   }
   if (rows.kind === 'escaped') {
-    acc.starEscapes.push(refFrom(rows.ref ?? fromCall, repoPath, sf));
+    acc.starEscapes.push(refFrom(rows.ref ?? access.rootCall, repoPath, sf));
     return;
   }
   if (rows.kind === 'dead') {
     // result fetched but never bound/used — real evidence of a wasted `*` read.
-    acc.starReadSites.push(refFrom(fromCall, repoPath, sf));
+    acc.starReadSites.push(refFrom(access.rootCall, repoPath, sf));
     return;
   }
 
   // rows.kind === 'var' — scan the local scope for property access on the var.
-  acc.starReadSites.push(refFrom(fromCall, repoPath, sf));
+  acc.starReadSites.push(refFrom(access.rootCall, repoPath, sf));
   const { accesses, escaped, escapeRef } = scanRowsVar(rows.ident, rows.declId, rows.scope, acc.columns);
   for (const a of accesses) recordAccess(acc, a.column, a.kind, refFrom(a.node, repoPath, sf));
-  if (escaped) acc.starEscapes.push(escapeRef ? refFrom(escapeRef, repoPath, sf) : refFrom(fromCall, repoPath, sf));
+  if (escaped) acc.starEscapes.push(escapeRef ? refFrom(escapeRef, repoPath, sf) : refFrom(access.rootCall, repoPath, sf));
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +200,17 @@ function verdictFor(col: string, table: string, acc: TableAcc, reach?: ReachResu
     return make('used', true, explicit, `selected by name in ${explicit.length} read(s) — certain.`);
   }
 
+  const sqlExplicit = acc.sqlViewExplicit.get(col);
+  if (sqlExplicit && sqlExplicit.length > 0) {
+    const views = [...(acc.sqlViewNames.get(col) ?? [])].sort();
+    return make(
+      'used',
+      true,
+      sqlExplicit,
+      `read by SQL view${views.length === 1 ? '' : 's'} ${views.map((v) => `\`${v}\``).join(', ')} — certain DB-side read.`,
+    );
+  }
+
   // 2. select('*') accesses found locally.
   const star = acc.starAccess.get(col);
   if (star && star.jsx.length > 0) {
@@ -212,6 +240,15 @@ function verdictFor(col: string, table: string, acc: TableAcc, reach?: ReachResu
     );
   }
 
+  if (acc.sqlViewOpaque.length > 0) {
+    return make(
+      'unknown',
+      false,
+      acc.sqlViewOpaque,
+      `read by ${acc.sqlViewOpaque.length} SQL view(s), but exact columns could not be attributed — cannot call this unread (heuristic).`,
+    );
+  }
+
   // 4. Reads stayed local / were explicit, column never appeared → likely dead.
   if (acc.starReadCount > 0) {
     return make(
@@ -234,6 +271,24 @@ function verdictFor(col: string, table: string, acc: TableAcc, reach?: ReachResu
   // 5. No TS read of this table at all. Honest floor: from TS's view it isn't
   // read (other languages are out of scope here).
   return make('likely_dead', false, [], `no TypeScript read of \`${table}\` found (heuristic; other languages not analyzed).`);
+}
+
+function applySqlViewUsage(tables: Map<string, TableAcc>, sqlViewReads: SqlViewRead[]) {
+  for (const read of sqlViewReads) {
+    const acc = tables.get(read.table);
+    if (!acc) continue;
+    if (read.confidence === 'certain') {
+      for (const col of read.columns ?? []) {
+        if (!acc.columns.has(col)) continue;
+        push(acc.sqlViewExplicit, col, read.source);
+        const names = acc.sqlViewNames.get(col) ?? new Set<string>();
+        names.add(read.viewName);
+        acc.sqlViewNames.set(col, names);
+      }
+    } else {
+      acc.sqlViewOpaque.push(read.source);
+    }
+  }
 }
 
 function recordAccess(acc: TableAcc, col: string, kind: AccessKind, ref: SourceRef) {
@@ -507,6 +562,15 @@ export function resolveTableName(arg: Node | undefined): string | undefined {
   const inner = arg ? unwrapParens(arg) : undefined;
   if (inner && Node.isAsExpression(inner)) return literalString(unwrapParens(inner.getExpression()));
   return undefined;
+}
+
+function resolveTableArg(arg: Node | undefined): { name?: string; bypass: boolean } {
+  return { name: resolveTableName(arg), bypass: false };
+}
+
+function isBareReturnedBuilder(fromCall: CallExpression, chain: ChainInfo): boolean {
+  if (chain.outerCall !== fromCall) return false;
+  return fromCall.getParent()?.getParent()?.getKind() === SyntaxKind.ReturnStatement;
 }
 
 export function unwrapParens(node: Node | undefined): Node | undefined {

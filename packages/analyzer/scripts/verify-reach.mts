@@ -1,7 +1,7 @@
 // Stage B1 verification — REPORT, not UI.
 // Runs the real analyzer over Batch-Guard.ai-2 and reports the reach axis for
 // batches / ml_scores / model_training_events, then runs the honesty checks.
-import { parseSql } from '../src/sql/parseSql.js';
+import { parseSchema } from '../src/sql/parseSql.js';
 import { loadProject } from '../src/ts/parseTs.js';
 import { computeColumnUsage } from '../src/ts/columnUsage.js';
 import type { ColumnUsage } from '@throughline/core';
@@ -18,10 +18,12 @@ function pad(s: string, n: number) {
 async function main() {
   console.log(`\n# THROUGHLINE Stage B1 — reach verification\nrepo: ${REPO}\n`);
   const t0 = Date.now();
-  const contracts = await parseSql(REPO);
+  const { nodes: contracts, sqlViewReads } = await parseSchema(REPO);
   const project = loadProject(REPO);
-  const usageByTable = computeColumnUsage(REPO, contracts, project);
-  console.log(`analyzed in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${contracts.length} contracts\n`);
+  const usageByTable = computeColumnUsage(REPO, contracts, project, sqlViewReads);
+  console.log(
+    `analyzed in ${((Date.now() - t0) / 1000).toFixed(1)}s — ${contracts.length} contracts, ${sqlViewReads.length} SQL view read(s)\n`,
+  );
 
   const violations: string[] = [];
 
@@ -69,6 +71,18 @@ async function main() {
   console.log(
     `## codebase-wide reach tally (${usageByTable.size} contracts): ui_shown=${tally.ui_shown} server_only=${tally.server_only} never_read=${tally.never_read} unknown=${tally.unknown}\n`,
   );
+  if (sqlViewReads.length > 0) {
+    console.log('## SQL view read evidence\n');
+    for (const read of sqlViewReads.slice(0, 12)) {
+      const target =
+        read.confidence === 'certain'
+          ? `${read.table}.${(read.columns ?? []).join(',')}`
+          : `${read.table}.* (opaque columns)`;
+      console.log(`  ${read.viewName} -> ${target}  ${read.source.filePath}:${read.source.startLine}`);
+    }
+    if (sqlViewReads.length > 12) console.log(`  ... ${sqlViewReads.length - 12} more`);
+    console.log('');
+  }
   console.log(
     `  NB: the three focus tables show no never_read — each has an escaping select('*'),\n` +
       `  which the conservative rule (A2) forbids from ever yielding never_read. never_read\n` +

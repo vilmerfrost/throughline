@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 import { Project } from 'ts-morph';
-import type { ColumnUsage, GraphNode } from '@throughline/core';
+import type { ColumnUsage, GraphNode, SqlViewRead } from '@throughline/core';
 import { computeColumnUsage } from './columnUsage.js';
 
 // Build a contract GraphNode with the given columns.
@@ -16,10 +16,14 @@ function contract(table: string, columns: string[]): GraphNode {
 }
 
 // Run the analyzer over an in-memory .tsx fixture and return the per-column map.
-function run(code: string, contracts: GraphNode[]): Map<string, Map<string, ColumnUsage>> {
+function run(
+  code: string,
+  contracts: GraphNode[],
+  sqlViewReads: SqlViewRead[] = [],
+): Map<string, Map<string, ColumnUsage>> {
   const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { jsx: 4 } });
-  project.createSourceFile('src/fixture.tsx', code);
-  const byTable = computeColumnUsage('/repo', contracts, project);
+  project.createSourceFile('/repo/src/fixture.tsx', code);
+  const byTable = computeColumnUsage('/repo', contracts, project, sqlViewReads);
   const out = new Map<string, Map<string, ColumnUsage>>();
   for (const [table, usages] of byTable) {
     out.set(table, new Map(usages.map((u) => [u.column, u])));
@@ -122,6 +126,62 @@ test('table never read in TS → likely_dead with no evidence and an honest note
   assert.match(t.get('id')!.note, /no TypeScript read/);
 });
 
+test('SQL view explicit column read is used evidence even when TS never reads the table', () => {
+  const code = `
+    async function w(sb: any) {
+      await sb.from('t_view').insert({ id: 1 });
+    }
+  `;
+  const viewRead: SqlViewRead = {
+    viewName: 'v_t_view',
+    table: 't_view',
+    columns: ['id'],
+    confidence: 'certain',
+    source: {
+      language: 'sql',
+      filePath: 'supabase/migrations/001.sql',
+      startLine: 5,
+      endLine: 7,
+      snippet: 'create view v_t_view as select id from t_view;',
+    },
+  };
+  const t = run(code, [contract('t_view', ['id', 'hidden'])], [viewRead]).get('t_view')!;
+
+  assert.equal(t.get('id')!.verdict, 'used');
+  assert.equal(t.get('id')!.certain, true);
+  assert.equal(t.get('id')!.reach, 'server_only');
+  assert.match(t.get('id')!.note, /SQL view `v_t_view`/);
+  assert.equal(t.get('hidden')!.verdict, 'likely_dead');
+});
+
+test('opaque SQL view table read makes every otherwise unread column unknown', () => {
+  const code = `
+    async function w(sb: any) {
+      await sb.from('t_view').insert({ id: 1 });
+    }
+  `;
+  const viewRead: SqlViewRead = {
+    viewName: 'v_t_view_complex',
+    table: 't_view',
+    confidence: 'opaque',
+    note: 'View reads this table but columns could not be attributed.',
+    source: {
+      language: 'sql',
+      filePath: 'supabase/migrations/001.sql',
+      startLine: 5,
+      endLine: 12,
+      snippet: 'create view v_t_view_complex as with x as (...) select * from x;',
+    },
+  };
+  const t = run(code, [contract('t_view', ['id', 'hidden'])], [viewRead]).get('t_view')!;
+
+  for (const col of ['id', 'hidden']) {
+    assert.equal(t.get(col)!.verdict, 'unknown');
+    assert.equal(t.get(col)!.reach, 'unknown');
+    assert.match(t.get(col)!.note, /SQL view/);
+  }
+});
+
 test('alias select `a:real_col` resolves to the real column → used', () => {
   const code = `
     async function load(sb: any) {
@@ -187,4 +247,22 @@ test('honesty invariants hold across a mixed fixture', () => {
     // every non-used verdict admits it is a heuristic
     if (u.verdict !== 'used') assert.match(u.note, /heuristic/);
   }
+});
+
+test('simple Supabase table helper select contributes column usage at the call site', () => {
+  const code = `
+    function adapterRunsTable(admin: any) {
+      return admin.from('t_helper');
+    }
+    async function load(admin: any) {
+      const { data } = await adapterRunsTable(admin).select('status');
+      return data;
+    }
+  `;
+  const t = run(code, [contract('t_helper', ['status', 'hidden'])]).get('t_helper')!;
+
+  assert.equal(t.get('status')!.verdict, 'used');
+  assert.equal(t.get('status')!.certain, true);
+  assert.match(t.get('status')!.evidence[0].snippet, /adapterRunsTable\(admin\)\.select\('status'\)/);
+  assert.equal(t.get('hidden')!.verdict, 'unknown');
 });

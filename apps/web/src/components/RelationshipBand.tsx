@@ -24,22 +24,27 @@ export function RelationshipBand({ neighborhood, onSelectContract }: Props) {
   return (
     <section
       aria-label={`Foreign-key relationships for ${contractLabel}`}
-      className="shrink-0 border-t border-neutral-800 bg-neutral-900"
+      className="shrink-0 border-t border-neutral-800 bg-neutral-950 px-5 py-3"
     >
-      <div className="flex items-center gap-2 px-4 pt-2 text-[11px] font-semibold uppercase tracking-wide text-neutral-600">
-        foreign-key relationships
-        <span className="font-normal lowercase tracking-normal text-neutral-600">
-          · table ↔ table, not data touches
+      {/* Card-style header matching the Root Causes polish bar — a clear label
+          on the left, the honesty caveat on the right, both muted. */}
+      <div className="mb-2 flex items-baseline justify-between gap-3">
+        <h3 className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+          Foreign-key neighborhood
+        </h3>
+        <span className="text-[11px] text-neutral-600">
+          table ↔ table — not data touches
         </span>
       </div>
 
       {isIsland ? (
-        <p className="px-4 py-3 text-xs text-neutral-500">
-          No foreign-key relationships — <span className="text-neutral-400">{contractLabel}</span>{' '}
-          neither references another table nor is referenced by one.
-        </p>
+        <div className="rounded-lg border border-neutral-800 bg-neutral-900/60 px-4 py-3 text-xs text-neutral-500">
+          No foreign-key relationships —{' '}
+          <span className="font-mono text-neutral-300">{contractLabel}</span> neither references
+          another table nor is referenced by one.
+        </div>
       ) : (
-        <div className="flex flex-col gap-1.5 px-4 pb-2.5 pt-1.5">
+        <div className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2.5">
           <Track
             label="references"
             arrow="→"
@@ -47,6 +52,7 @@ export function RelationshipBand({ neighborhood, onSelectContract }: Props) {
             emptyHint="references no other table"
             onSelectContract={onSelectContract}
           />
+          <div className="h-px bg-neutral-800" aria-hidden />
           <Track
             label="referenced by"
             arrow="←"
@@ -72,7 +78,7 @@ interface TrackProps {
 
 function Track({ label, arrow, arrowLeading, edges, emptyHint, onSelectContract }: TrackProps) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-3">
       <span className="flex w-32 shrink-0 items-center gap-1 text-[11px] font-medium uppercase tracking-wide text-neutral-500">
         {arrowLeading && <span className="text-neutral-600">{arrow}</span>}
         {label}
@@ -84,7 +90,11 @@ function Track({ label, arrow, arrowLeading, edges, emptyHint, onSelectContract 
           <span className="py-1 text-[11px] italic text-neutral-600">{emptyHint}</span>
         ) : (
           edges.map((e, i) => (
-            <EdgeChip key={`${e.relationship.fromTable}.${e.fromColumn}->${e.relationship.toTable}.${e.toColumn}#${i}`} edge={e} onSelectContract={onSelectContract} />
+            <EdgeChip
+              key={`${e.relationship.fromTable}.${e.fromColumn}->${e.relationship.toTable}.${e.toColumn}#${i}`}
+              edge={e}
+              onSelectContract={onSelectContract}
+            />
           ))
         )}
       </div>

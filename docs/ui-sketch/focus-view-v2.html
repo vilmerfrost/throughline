@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1440, initial-scale=1" />
+<title>Throughline — Focus view (sketch v2)</title>
+<style>
+  :root{
+    --bg-base:#0b0d10; --bg-surface:#141821; --bg-node:#1a1f29; --bg-popover:#232a36;
+    --border:#262c37; --border-strong:#333b49;
+    --contract:#3b82f6; --verified:#16a34a; --narrowed:#ca8a04; --asserted:#dc2626;
+    --dark:#1f2937; --aligned:#14b8a6; --mismatch:#ea580c; --ai:#8b5cf6;
+    --edge-read:#93c5fd; --edge-write:#f87171;
+    --t-100:#e8eaed; --t-200:#c3c7cf; --t-400:#8b919e; --t-500:#6b7280; --t-600:#525866;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    --elev1:inset 0 1px 0 rgba(255,255,255,.045), 0 2px 6px rgba(0,0,0,.5);
+    --elev2:0 16px 44px rgba(0,0,0,.62), 0 2px 8px rgba(0,0,0,.5);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--bg-base);color:var(--t-200);font-family:var(--sans);
+    font-size:13px;-webkit-font-smoothing:antialiased}
+  .mono{font-family:var(--mono)}
+  .tiny{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--t-500)}
+  .ico{width:14px;height:14px;stroke-width:1.6;flex:none}
+  .ico-sm{width:12px;height:12px;stroke-width:1.6;flex:none}
+  .dot{width:9px;height:9px;border-radius:50%;flex:none}
+  .ring{width:9px;height:9px;border-radius:50%;border:1.6px solid currentColor;flex:none}
+
+  /* shell */
+  .app{width:1440px;height:900px;display:flex;flex-direction:column;overflow:hidden}
+  /* topbar */
+  .topbar{height:52px;flex:none;display:flex;align-items:center;gap:18px;padding:0 16px;
+    background:var(--bg-surface);border-bottom:1px solid var(--border)}
+  .brand{display:flex;align-items:baseline;gap:8px}
+  .brand .wm{font-family:var(--mono);font-size:15px;color:var(--t-100);font-weight:600;letter-spacing:-.02em}
+  .crumb{display:flex;align-items:center;gap:8px;color:var(--t-400)}
+  .crumb .sep{color:var(--t-600)}
+  .stats{color:var(--t-500);font-size:12px}
+  .stats b{color:var(--mismatch);font-weight:600}
+  .spacer{flex:1}
+  .seg{display:flex;background:var(--bg-base);border:1px solid var(--border);border-radius:7px;padding:3px;gap:2px}
+  .seg button{font:inherit;font-size:12px;color:var(--t-500);background:none;border:0;
+    padding:5px 12px;border-radius:5px;cursor:pointer}
+  .seg button.active{background:var(--bg-node);color:var(--t-100);box-shadow:inset 0 -2px 0 var(--contract)}
+  .btn{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--t-200);
+    background:var(--bg-node);border:1px solid var(--border-strong);border-radius:6px;padding:6px 11px;cursor:pointer}
+  .badge-live{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--t-400);
+    border:1px solid var(--border);border-radius:6px;padding:5px 10px}
+  .badge-live .dot{background:var(--verified);box-shadow:0 0 8px var(--verified)}
+
+  /* body */
+  .body{flex:1;display:flex;min-height:0}
+  .panel-l{width:280px;flex:none;background:var(--bg-base);border-right:1px solid var(--border);display:flex;flex-direction:column}
+  .panel-r{width:360px;flex:none;background:var(--bg-base);border-left:1px solid var(--border);overflow:auto;padding:14px}
+  .center{flex:1;min-width:0;display:flex;flex-direction:column;position:relative;background:
+    radial-gradient(120% 80% at 50% 0%, #0e1218 0%, var(--bg-base) 60%)}
+
+  /* left panel */
+  .sec{padding:12px 14px;border-bottom:1px solid var(--border)}
+  .sec-h{display:flex;align-items:center;gap:7px;margin-bottom:10px}
+  .sec-h .c{margin-left:auto;font-size:11px;color:var(--t-500)}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{display:flex;align-items:center;gap:6px;font-size:11px;padding:4px 8px;border-radius:6px;
+    border:1px solid var(--border);color:var(--t-500);cursor:pointer}
+  .chip.on{border-color:var(--border-strong);background:var(--bg-node);color:var(--t-100)}
+  .search{display:flex;align-items:center;gap:7px;border:1px solid var(--border-strong);
+    border-radius:6px;padding:6px 9px;color:var(--t-500);background:var(--bg-base)}
+  .search input{all:unset;font-family:var(--mono);font-size:12px;color:var(--t-200);width:100%}
+  .clist{flex:1;overflow:auto}
+  .crow{display:flex;align-items:center;gap:9px;padding:9px 13px 9px 10px;border-left:3px solid transparent;cursor:pointer}
+  .crow .name{font-family:var(--mono);font-size:13px}
+  .crow .tag{margin-left:auto;font-size:10px;padding:2px 6px;border-radius:4px}
+  .crow.sel{background:var(--bg-node);border-left-color:var(--contract);box-shadow:var(--elev1)}
+
+  /* lane headers */
+  .lanes{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;padding:12px 22px 4px;flex:none}
+  .lanes .lh{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--t-500);text-align:center}
+  .canvas{flex:1;position:relative;display:grid;grid-template-columns:1fr 1fr 1fr;
+    align-items:center;padding:0 22px;gap:0;min-height:0}
+  .lane{display:flex;flex-direction:column;gap:18px;align-items:center;justify-content:center}
+
+  /* touch card */
+  .touch{width:218px;border-radius:8px;background:var(--bg-node);border:1px solid var(--border-strong);
+    box-shadow:var(--elev1);position:relative}
+  .touch .hd{display:flex;align-items:center;gap:8px;padding:9px 11px 7px}
+  .touch .lang{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--t-100);font-weight:500}
+  .touch .dir{display:flex;align-items:center;gap:4px;color:var(--t-400);font-size:11px}
+  .count{margin-left:auto;display:flex;align-items:center;font-size:11px;font-weight:600;
+    color:var(--t-200);background:#0e131b;border:1px solid var(--border-strong);border-radius:5px;padding:2px 7px;cursor:default}
+  .touch .bd{padding:0 11px 10px;display:flex;align-items:center;gap:8px}
+  .verdict{font-family:var(--mono);font-size:12px}
+  .sub{font-size:11px;color:var(--t-500)}
+  .touch.crit{border-color:var(--mismatch);border-width:1.5px;box-shadow:0 0 22px -3px var(--mismatch),var(--elev1)}
+  .touch.dark{border-color:#2c333f}
+  .touch.dark .lang{color:var(--t-200)}
+  .quiet{opacity:.82}
+
+  /* spine */
+  .spine-wrap{display:flex;justify-content:center}
+  .spine{width:280px;border:2px solid var(--contract);border-radius:11px;padding:4px;
+    box-shadow:0 0 26px -6px var(--contract),var(--elev1)}
+  .spine-in{border:1px solid var(--contract);border-radius:8px;background:var(--bg-node);overflow:hidden}
+  .spine .band{display:flex;align-items:center;gap:7px;padding:7px 12px;background:rgba(59,130,246,.10);
+    border-bottom:1px solid rgba(59,130,246,.35)}
+  .spine .nm{font-family:var(--mono);font-size:16px;color:var(--t-100);padding:11px 14px 3px}
+  .spine .meta{font-size:11px;color:var(--t-500);padding:0 14px 11px}
+  .spine .crit{display:flex;align-items:center;gap:7px;font-size:11px;font-weight:600;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--mismatch);padding:7px 14px;
+    background:color-mix(in oklab,var(--mismatch) 14%,transparent);
+    border-top:1px solid color-mix(in oklab,var(--mismatch) 40%,transparent)}
+
+  /* edges (svg overlay) */
+  .edges{position:absolute;inset:0;pointer-events:none}
+  .elabel{font-size:10px;font-family:var(--mono)}
+  .echip{fill:var(--bg-popover);stroke:var(--border-strong)}
+
+  /* tooltip */
+  .tip{position:absolute;width:226px;background:var(--bg-popover);border:1px solid var(--border-strong);
+    border-radius:8px;box-shadow:var(--elev2);padding:10px 11px;font-size:11.5px;line-height:1.45;color:var(--t-200);z-index:5}
+  .tip:after{content:"";position:absolute;width:10px;height:10px;background:var(--bg-popover);
+    border-right:1px solid var(--border-strong);border-bottom:1px solid var(--border-strong);
+    transform:rotate(45deg)}
+  .tip b{color:var(--t-100);font-family:var(--mono)}
+  .tip .mut{color:var(--t-500)}
+
+  /* fk band */
+  .fk{flex:none;border-top:1px solid var(--border);background:var(--bg-base);padding:9px 22px}
+  .fk-h{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .fkchips{display:flex;gap:8px;flex-wrap:wrap}
+  .fkchip{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;color:var(--t-200);
+    background:var(--bg-node);border:1px solid var(--border);border-radius:6px;padding:5px 9px}
+  .fkchip .car{font-family:var(--sans);color:var(--t-500);font-size:10px}
+
+  /* legend popover */
+  .legend{position:absolute;left:18px;bottom:64px;width:340px;background:var(--bg-popover);
+    border:1px solid var(--border-strong);border-radius:10px;box-shadow:var(--elev2);padding:13px 14px;z-index:6}
+  .legend h4{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--t-400);margin-bottom:9px;
+    display:flex;align-items:center;gap:7px}
+  .legrp{margin-bottom:11px}
+  .legrp .gt{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--t-600);margin-bottom:5px}
+  .legrow{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+  .leitem{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--t-300,#aab0bb)}
+  .lecount{display:inline-flex;align-items:center;font-size:10px;font-weight:600;color:var(--t-200);
+    background:#0e131b;border:1px solid var(--border-strong);border-radius:4px;padding:1px 6px}
+
+  /* inspector */
+  .ins-h{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+  .ins-h .nm{font-family:var(--mono);font-size:15px;color:var(--t-100)}
+  .ins-h .tag{margin-left:auto;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--contract);
+    border:1px solid color-mix(in oklab,var(--contract) 45%,transparent);border-radius:5px;padding:2px 7px}
+  .vbanner{display:flex;gap:9px;border-radius:8px;padding:10px 11px;font-size:12px;line-height:1.45;margin-bottom:14px;
+    background:color-mix(in oklab,var(--mismatch) 13%,transparent);
+    border:1px solid color-mix(in oklab,var(--mismatch) 38%,transparent);color:#f2c7ad}
+  .vbanner b{color:var(--mismatch)}
+  .card{border:1px solid var(--border);background:rgba(20,24,33,.6);border-radius:9px;padding:12px;margin-bottom:14px;box-shadow:var(--elev1)}
+  .card-h{display:flex;align-items:center;gap:7px;margin-bottom:10px}
+  .card-h .t{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--t-400)}
+  .card-h .s{margin-left:auto;font-size:11px;color:var(--t-500)}
+  .col{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:6px;margin:0 -4px}
+  .col .cn{font-family:var(--mono);font-size:12px;color:var(--t-200)}
+  .col .rl{margin-left:auto;font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--t-500)}
+  .col.nread{background:color-mix(in oklab,var(--narrowed) 9%,transparent)}
+  .col.nread .rl{color:var(--narrowed)}
+  .col.srv{background:color-mix(in oklab,var(--edge-read) 7%,transparent)}
+  .col.srv .rl{color:var(--edge-read)}
+  .col.unk{background:color-mix(in oklab,#737373 12%,transparent)}
+  .sumline{font-size:11px;color:var(--t-500);padding-top:9px;margin-top:3px;border-top:1px dashed var(--border)}
+  .sumline b{color:var(--t-200)}
+  .ai{border-left:3px solid var(--ai)}
+  .ai .body{font-size:12px;line-height:1.55;color:var(--t-300,#aab0bb);font-style:italic}
+  .ai .body .code{font-family:var(--mono);font-style:normal;color:#cdb8ff;background:rgba(139,92,246,.12);padding:0 4px;border-radius:3px}
+  .ai .fixbtn{margin-top:11px;display:flex;align-items:center;gap:7px;font-size:12px;color:#cdb8ff;
+    border:1px solid color-mix(in oklab,var(--ai) 45%,transparent);border-radius:6px;padding:7px 11px;width:max-content;cursor:pointer}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- TOP BAR -->
+  <div class="topbar">
+    <div class="brand">
+      <span class="wm">throughline</span>
+      <span class="tiny">codebase x-ray</span>
+    </div>
+    <div class="crumb mono" style="font-size:12px">
+      <i data-lucide="folder-git-2" class="ico-sm"></i> Batch-Guard.ai-2
+    </div>
+    <div class="stats">214 nodes · <b>6 drift</b></div>
+    <div class="spacer"></div>
+    <div class="seg">
+      <button class="active">Focus</button>
+      <button>Root Causes</button>
+      <button>Full map</button>
+    </div>
+    <button class="btn"><i data-lucide="refresh-cw" class="ico"></i> Re-analyze</button>
+    <div class="badge-live"><span class="dot"></span> Live</div>
+  </div>
+
+  <div class="body">
+    <!-- LEFT PANEL -->
+    <div class="panel-l">
+      <div class="sec">
+        <div class="sec-h"><i data-lucide="list-filter" class="ico" style="color:var(--t-400)"></i>
+          <span class="tiny" style="color:var(--t-300,#aab0bb)">Filter</span>
+          <span class="c">18 of 42 contracts</span></div>
+        <div class="tiny" style="margin-bottom:6px;color:var(--t-600)">Trust</div>
+        <div class="chips" style="margin-bottom:9px">
+          <span class="chip on"><span class="dot" style="background:var(--verified)"></span>verified</span>
+          <span class="chip on"><span class="dot" style="background:var(--narrowed)"></span>narrowed</span>
+          <span class="chip on"><span class="dot" style="background:var(--asserted)"></span>asserted</span>
+          <span class="chip"><span class="dot" style="background:#3a424f"></span>dark</span>
+        </div>
+        <div class="tiny" style="margin-bottom:6px;color:var(--t-600)">Reach</div>
+        <div class="chips">
+          <span class="chip">shown</span><span class="chip">server-only</span>
+          <span class="chip on">never-read</span><span class="chip">unknown</span>
+        </div>
+      </div>
+      <div class="sec" style="border-bottom:1px solid var(--border)">
+        <div class="sec-h"><span class="tiny" style="color:var(--t-300,#aab0bb)">Contracts</span><span class="c">42</span></div>
+        <div class="search"><i data-lucide="search" class="ico-sm"></i><input placeholder="search tables…"></div>
+      </div>
+      <div class="clist">
+        <div class="crow sel"><span class="dot" style="background:var(--mismatch);box-shadow:0 0 8px var(--mismatch)"></span>
+          <span class="name" style="color:var(--t-50,#f5f6f7)">batches</span>
+          <span class="tag" style="color:var(--mismatch);background:color-mix(in oklab,var(--mismatch) 16%,transparent)">mismatch</span></div>
+        <div class="crow"><span class="dot" style="background:var(--asserted)"></span>
+          <span class="name" style="color:var(--t-100)">scans</span>
+          <span class="tag" style="color:var(--asserted);background:color-mix(in oklab,var(--asserted) 14%,transparent)">asserted</span></div>
+        <div class="crow quiet"><span class="dot" style="background:var(--narrowed)"></span>
+          <span class="name" style="color:var(--t-200)">users</span>
+          <span class="tag" style="color:var(--narrowed)">narrowed</span></div>
+        <div class="crow quiet"><span class="dot" style="background:var(--narrowed)"></span>
+          <span class="name" style="color:var(--t-200)">audit_log</span>
+          <span class="tag" style="color:var(--narrowed)">narrowed</span></div>
+        <div class="crow quiet" style="opacity:.62"><span class="dot" style="background:var(--verified)"></span>
+          <span class="name" style="color:var(--t-300,#aab0bb)">qa_results</span>
+          <span class="tag" style="color:var(--verified)">verified</span></div>
+        <div class="crow quiet" style="opacity:.62"><span class="dot" style="background:var(--verified)"></span>
+          <span class="name" style="color:var(--t-300,#aab0bb)">api_keys</span>
+          <span class="tag" style="color:var(--verified)">verified</span></div>
+        <div class="crow quiet" style="opacity:.5"><span class="dot" style="background:var(--verified)"></span>
+          <span class="name" style="color:var(--t-400)">sessions</span>
+          <span class="tag" style="color:var(--t-600)">verified</span></div>
+      </div>
+    </div>
+
+    <!-- CENTER -->
+    <div class="center">
+      <div class="lanes">
+        <div class="lh">Writers — data enters</div>
+        <div class="lh">Source of truth</div>
+        <div class="lh">Readers — data exits</div>
+      </div>
+      <div class="canvas">
+        <svg class="edges" viewBox="0 0 900 460" preserveAspectRatio="none">
+          <path d="M250,150 C360,150 360,230 430,230" fill="none" stroke="var(--edge-write)" stroke-width="1.4" opacity=".75"/>
+          <path d="M250,300 C360,300 360,250 430,250" fill="none" stroke="var(--edge-write)" stroke-width="1.4" opacity=".5"/>
+          <path d="M620,230 C690,230 690,120 770,120" fill="none" stroke="var(--edge-read)" stroke-width="1.4" opacity=".75"/>
+          <path d="M620,245 C690,245 690,235 770,235" fill="none" stroke="var(--edge-read)" stroke-width="1.4" opacity=".55"/>
+          <path d="M620,255 C690,255 690,345 770,345" fill="none" stroke="var(--edge-read)" stroke-width="1.4" opacity=".4"/>
+          <g><rect class="echip" x="318" y="172" width="92" height="17" rx="4"/><text class="elabel" x="364" y="184" text-anchor="middle" fill="#f2b8a0">writes mismatch</text></g>
+          <g><rect class="echip" x="650" y="98" width="84" height="17" rx="4"/><text class="elabel" x="692" y="110" text-anchor="middle" fill="#bcd6ff">reads verified</text></g>
+        </svg>
+
+        <!-- WRITERS -->
+        <div class="lane">
+          <div class="touch crit">
+            <div class="hd">
+              <span class="dot" style="background:var(--mismatch)"></span>
+              <span class="lang"><i data-lucide="braces" class="ico" style="color:#f2b8a0"></i> Rust write</span>
+              <span class="dir"><i data-lucide="arrow-up-from-line" class="ico-sm"></i></span>
+              <span class="count">×3</span>
+            </div>
+            <div class="bd"><span class="verdict" style="color:var(--mismatch)">schema mismatch</span></div>
+            <div class="bd" style="margin-top:-6px"><span class="sub">writes field not in schema</span></div>
+          </div>
+          <div class="touch dark quiet">
+            <div class="hd">
+              <span class="dot" style="background:#3a424f"></span>
+              <span class="lang"><i data-lucide="file-code" class="ico" style="color:var(--t-400)"></i> TypeScript write</span>
+              <span class="dir"><i data-lucide="arrow-up-from-line" class="ico-sm"></i></span>
+              <span class="count">×5</span>
+            </div>
+            <div class="bd"><span class="verdict" style="color:var(--t-400)">untyped (dark)</span></div>
+          </div>
+        </div>
+
+        <!-- SPINE -->
+        <div class="lane">
+          <div class="spine-wrap"><div class="spine"><div class="spine-in">
+            <div class="band"><span class="dot" style="background:var(--contract)"></span>
+              <span class="tiny" style="color:#9cc1ff">Table · sql</span></div>
+            <div class="nm">batches</div>
+            <div class="meta">14 columns · 3 never read</div>
+            <div class="crit"><i data-lucide="alert-triangle" class="ico-sm"></i> Schema mismatch</div>
+          </div></div></div>
+        </div>
+
+        <!-- READERS -->
+        <div class="lane">
+          <div class="touch" style="border-color:color-mix(in oklab,var(--verified) 55%,var(--border-strong))">
+            <div class="hd">
+              <span class="dot" style="background:var(--verified)"></span>
+              <span class="lang"><i data-lucide="file-code" class="ico" style="color:#7fd79a"></i> TypeScript read</span>
+              <span class="dir"><i data-lucide="arrow-down-to-line" class="ico-sm"></i></span>
+              <span class="count" id="cnt">×8</span>
+            </div>
+            <div class="bd"><span class="verdict" style="color:var(--verified)">verified</span></div>
+            <!-- COUNT TOOLTIP -->
+            <div class="tip" style="right:-6px;top:-72px">
+              <b>×8</b> — 8 separate code locations<br>aggregated into this card.<br>
+              <span class="mut">Same language · direction · verdict.<br>Click to expand each touch (file:line).</span>
+              <span style="position:absolute;right:24px;bottom:-6px" class="arr"></span>
+            </div>
+          </div>
+          <div class="touch quiet">
+            <div class="hd">
+              <span class="dot" style="background:var(--narrowed)"></span>
+              <span class="lang"><i data-lucide="file-code" class="ico" style="color:#d9b85a"></i> TypeScript read</span>
+              <span class="dir"><i data-lucide="arrow-down-to-line" class="ico-sm"></i></span>
+              <span class="count">×2</span>
+            </div>
+            <div class="bd"><span class="verdict" style="color:var(--narrowed)">narrowed</span></div>
+          </div>
+          <div class="touch dark quiet">
+            <div class="hd">
+              <span class="dot" style="background:#3a424f"></span>
+              <span class="lang"><i data-lucide="code" class="ico" style="color:var(--t-400)"></i> Python read</span>
+              <span class="dir"><i data-lucide="arrow-down-to-line" class="ico-sm"></i></span>
+              <span class="count">×1</span>
+            </div>
+            <div class="bd"><span class="verdict" style="color:var(--t-400)">shallow (dark)</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- LEGEND POPOVER -->
+      <div class="legend">
+        <h4><i data-lucide="help-circle" class="ico-sm"></i> What do these mean?</h4>
+        <div class="legrp">
+          <div class="gt">Trust</div>
+          <div class="legrow">
+            <span class="leitem"><span class="dot" style="background:var(--verified)"></span>verified</span>
+            <span class="leitem"><span class="dot" style="background:var(--narrowed)"></span>narrowed</span>
+            <span class="leitem"><span class="dot" style="background:var(--asserted)"></span>asserted</span>
+            <span class="leitem"><span class="dot" style="background:#3a424f"></span>dark</span>
+          </div>
+        </div>
+        <div class="legrp">
+          <div class="gt">Schema match</div>
+          <div class="legrow">
+            <span class="leitem"><span class="dot" style="background:var(--aligned)"></span>aligned</span>
+            <span class="leitem"><span class="dot" style="background:var(--mismatch)"></span>mismatch</span>
+          </div>
+        </div>
+        <div class="legrp">
+          <div class="gt">Reach</div>
+          <div class="legrow">
+            <span class="leitem"><span class="dot" style="background:var(--verified)"></span>shown</span>
+            <span class="leitem"><span class="dot" style="background:var(--edge-read)"></span>server-only</span>
+            <span class="leitem"><span class="dot" style="background:var(--narrowed)"></span>never-read</span>
+            <span class="leitem"><span class="ring" style="color:var(--t-500)"></span>unknown</span>
+          </div>
+        </div>
+        <div class="legrp" style="margin-bottom:0">
+          <div class="gt">Count badge</div>
+          <div class="legrow">
+            <span class="lecount">×N</span>
+            <span class="leitem" style="flex:1;min-width:0;line-height:1.4">Aggregated touches — N code locations of the same language + direction + verdict. Click a card to expand them.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT INSPECTOR -->
+    <div class="panel-r">
+      <div class="ins-h">
+        <span class="dot" style="background:var(--contract)"></span>
+        <span class="nm">batches</span>
+        <span class="tag">Table</span>
+      </div>
+      <div class="vbanner">
+        <i data-lucide="alert-triangle" class="ico" style="color:var(--mismatch);margin-top:1px"></i>
+        <div><b>Schema mismatch on write</b> — a Rust insert writes a field that doesn't exist on this table.</div>
+      </div>
+      <div class="card">
+        <div class="card-h"><i data-lucide="columns-3" class="ico" style="color:var(--t-400)"></i>
+          <span class="t">Columns</span><span class="s">14</span></div>
+        <div class="col"><span class="dot" style="background:var(--verified)"></span><span class="cn">id</span><span class="rl">shown</span></div>
+        <div class="col"><span class="dot" style="background:var(--verified)"></span><span class="cn">status</span><span class="rl">shown</span></div>
+        <div class="col srv"><span class="ring" style="color:var(--edge-read)"></span><span class="cn">ingested_at</span><span class="rl">server-only</span></div>
+        <div class="col nread"><span class="dot" style="background:var(--narrowed)"></span><span class="cn">legacy_score</span><span class="rl">never read</span></div>
+        <div class="col nread"><span class="dot" style="background:var(--narrowed)"></span><span class="cn">raw_blob</span><span class="rl">never read</span></div>
+        <div class="col unk"><span class="ring" style="color:var(--t-500)"></span><span class="cn">meta_json</span><span class="rl">unknown</span></div>
+        <div class="col"><span class="dot" style="background:var(--verified)"></span><span class="cn">created_at</span><span class="rl">shown</span></div>
+        <div class="sumline"><b>9 shown</b> · 2 server-only · <b style="color:var(--narrowed)">3 never read</b></div>
+      </div>
+      <div class="card ai">
+        <div class="card-h"><i data-lucide="sparkles" class="ico" style="color:#cdb8ff"></i>
+          <span class="t" style="color:#cdb8ff">AI explanation</span></div>
+        <div class="body">The Rust ingestion worker inserts a <span class="code">quality_v2</span> field
+          that doesn't exist on <span class="code">batches</span> — likely added to the application
+          code before the migration ran. The write silently drops it.</div>
+        <div class="fixbtn"><i data-lucide="wand-2" class="ico-sm"></i> Generate fix prompt</div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="https://unpkg.com/lucide@latest"></script>
+<script>lucide.createIcons();</script>
+</body>
+</html>

@@ -9,6 +9,8 @@ import {
   checkWrite,
 } from './facts.js';
 
+const sourceScopeSchema = z.enum(['production', 'test', 'migration', 'script', 'generated', 'unknown', 'all']);
+
 // Wrap a structured object as an MCP tool result: machine-readable
 // structuredContent + a text mirror for clients that ignore it.
 function ok(payload: unknown) {
@@ -30,9 +32,13 @@ export function createServer(cache: GraphCache): McpServer {
       title: 'Get table contract facts',
       description:
         'Read-only. Contract facts for a table (bare name): columns with type/nullable/default and read reach (+escapeTrail), writer/reader touches with trust or schemaMatch and the analyzer reason, drift findings, and declared FK neighbors with cardinality and external flag. Carries confidence, scope, analyzed_at, and real source grounding. Cannot change any verdict.',
-      inputSchema: { name: z.string().describe('Bare table name, e.g. "batches"') },
+      inputSchema: {
+        name: z.string().describe('Bare table name, e.g. "batches"'),
+        scope: sourceScopeSchema.optional().describe('Optional source-scope filter. Defaults to all.'),
+        includeTests: z.boolean().optional().describe('Set false to exclude test touches while keeping other scopes.'),
+      },
     },
-    async ({ name }) => ok(getTableFacts(name, cache.graph)),
+    async ({ name, scope, includeTests }) => ok(getTableFacts(name, cache.graph, { scope, includeTests })),
   );
 
   server.registerTool(
@@ -41,9 +47,13 @@ export function createServer(cache: GraphCache): McpServer {
       title: 'Get all touches in a file',
       description:
         'Read-only. Every data-contract touch in a file (path relative to the repo root, or absolute under it): each touch with its trust/schemaMatch verdict, the analyzer reason, nodeId, source snippet, direction, and the tables it touches. Entry point when editing a file. Carries confidence, scope, analyzed_at. Cannot change any verdict.',
-      inputSchema: { path: z.string().describe('File path relative to the repo root') },
+      inputSchema: {
+        path: z.string().describe('File path relative to the repo root'),
+        scope: sourceScopeSchema.optional().describe('Optional source-scope filter. Defaults to all.'),
+        includeTests: z.boolean().optional().describe('Set false to exclude test touches while keeping other scopes.'),
+      },
     },
-    async ({ path }) => ok(getFileFacts(path, cache.graph)),
+    async ({ path, scope, includeTests }) => ok(getFileFacts(path, cache.graph, { scope, includeTests })),
   );
 
   server.registerTool(
@@ -63,9 +73,12 @@ export function createServer(cache: GraphCache): McpServer {
       title: 'Get ranked root-cause levers',
       description:
         'Read-only. The deterministic root-cause rollup: dark/asserted touches grouped by (reason, client origin), ranked biggest-lever-first. Each lever has affectedCount, affected touch ids and contracts, the unresolved shape (e.g. parameter), and real grounding evidence. Carries analyzed_at. Cannot change any verdict.',
-      inputSchema: {},
+      inputSchema: {
+        scope: sourceScopeSchema.optional().describe('Optional source-scope filter. Defaults to all.'),
+        includeTests: z.boolean().optional().describe('Set false to exclude test touches while keeping other scopes.'),
+      },
     },
-    async () => ok(getRootCauseFacts(cache.graph)),
+    async ({ scope, includeTests }) => ok(getRootCauseFacts(cache.graph, { scope, includeTests })),
   );
 
   server.registerTool(

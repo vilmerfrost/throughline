@@ -14,6 +14,7 @@ export interface RootCauseRow {
   // place to fix — the others are honestly "no one-click lever".
   actionable: boolean;
   affectedTouches: GraphNode[]; // resolved from affectedTouchIds — grounded, may be empty
+  blockingTouches: GraphNode[]; // usage sites that must change; casts/bypasses are blockers even with a typed factory
 }
 
 export function classOf(rc: RootCause): RootCauseClass {
@@ -42,6 +43,15 @@ export function buildRootCauseRows(graph: Graph): RootCauseRow[] {
       affectedTouches: rc.affectedTouchIds
         .map((id) => byId.get(id))
         .filter((n): n is GraphNode => Boolean(n)),
+      blockingTouches: rc.affectedTouchIds
+        .map((id) => byId.get(id))
+        .filter(
+          (n): n is GraphNode =>
+            Boolean(n) &&
+            (n!.trustReason === 'ts-cast-concrete' ||
+              n!.trustReason === 'ts-cast-any' ||
+              n!.trustReason === 'ts-bypass-any'),
+        ),
     };
   });
 }
@@ -66,16 +76,27 @@ export function buildRootCauseFixRequest(
   const { rc } = row;
   const trust = REASON_TRUST[rc.reason] ?? 'dark';
 
-  // The single place to fix: the construction site (resolved) or the first
-  // captured parameter signature (parameter). Both are real SourceRefs.
-  const fixSource = rc.origin.source ?? rc.evidence?.[0];
+  // The place to fix depends on the reason. Loose clients are fixed at the
+  // construction/signature; casts and table-name bypasses are explicit blockers
+  // at usage sites, so the prompt must start there.
+  const usageSiteReason =
+    rc.reason === 'ts-cast-concrete' ||
+    rc.reason === 'ts-cast-any' ||
+    rc.reason === 'ts-bypass-any';
+  const fixSource = usageSiteReason
+    ? row.blockingTouches.find((t) => t.source)?.source
+    : (rc.origin.source ?? rc.evidence?.[0]);
 
   const node: GraphNode = {
     id: `rootcause:${row.key}`,
     kind: 'touch',
     language: 'typescript',
     label:
-      rc.origin.name === 'unresolved-origin' ? `${rc.origin.shape ?? 'client'} client` : rc.origin.name,
+      usageSiteReason
+        ? `${rc.reason} usage sites`
+        : rc.origin.name === 'unresolved-origin'
+          ? `${rc.origin.shape ?? 'client'} client`
+          : rc.origin.name,
     trust,
     trustReason: rc.reason,
     source: fixSource,

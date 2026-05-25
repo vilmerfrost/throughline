@@ -47,6 +47,7 @@ export const sampleGraph: Graph = {
       language: 'typescript',
       trust: 'verified',
       trustReason: 'ts-verified',
+      sourceScope: 'production',
       source: { language: 'typescript', filePath: 'src/ui/Batch.tsx', startLine: 10, endLine: 12, snippet: "supabase.from('batches').select('spice_density')" },
     },
     {
@@ -56,6 +57,7 @@ export const sampleGraph: Graph = {
       language: 'python',
       trust: 'dark',
       trustReason: 'shallow-grep-python',
+      sourceScope: 'script',
       source: { language: 'python', filePath: 'scripts/seed.py', startLine: 3, endLine: 3, snippet: "client.table('batches').insert(row)" },
     },
   ],

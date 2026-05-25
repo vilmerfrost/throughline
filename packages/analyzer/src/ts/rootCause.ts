@@ -4,6 +4,7 @@ import type {
   RootCause,
   RootCauseOrigin,
   SourceRef,
+  SourceScope,
   TrustReason,
   UnresolvedShape,
 } from '@throughline/core';
@@ -29,6 +30,7 @@ export interface RootCauseInput {
   // RC-a addendum: a real grounding ref for unresolved touches (e.g. the
   // function signature for the 'parameter' shape). Sampled into RootCause.evidence.
   evidence?: SourceRef;
+  sourceScope?: SourceScope;
 }
 
 // How many representative grounding refs to keep per unresolved group.
@@ -46,6 +48,7 @@ export function rollupRootCauses(inputs: RootCauseInput[]): RootCause[] {
     contracts: Set<string>;
     evidence: SourceRef[];
     evidenceSeen: Set<string>;
+    scopeBreakdown: Partial<Record<SourceScope, number>>;
   }
   const groups = new Map<string, Group>();
 
@@ -68,11 +71,14 @@ export function rollupRootCauses(inputs: RootCauseInput[]): RootCause[] {
         contracts: new Set(),
         evidence: [],
         evidenceSeen: new Set(),
+        scopeBreakdown: {},
       };
       groups.set(key, g);
     }
     g.touchIds.push(inp.touchId);
     g.contracts.add(inp.contract);
+    const scope = inp.sourceScope ?? 'unknown';
+    g.scopeBreakdown[scope] = (g.scopeBreakdown[scope] ?? 0) + 1;
     // Keep a capped, deduped sample of grounding refs (e.g. signatures).
     if (inp.evidence && g.evidence.length < EVIDENCE_CAP) {
       const ek = `${inp.evidence.filePath}:${inp.evidence.startLine}`;
@@ -89,6 +95,9 @@ export function rollupRootCauses(inputs: RootCauseInput[]): RootCause[] {
     affectedCount: g.touchIds.length,
     affectedTouchIds: g.touchIds,
     affectedContracts: [...g.contracts].sort(),
+    scopeBreakdown: g.scopeBreakdown,
+    productionImpact: (g.scopeBreakdown.production ?? 0) > 0,
+    testOnly: Object.keys(g.scopeBreakdown).length === 1 && (g.scopeBreakdown.test ?? 0) > 0,
     ...(g.evidence.length ? { evidence: g.evidence } : {}),
   }));
 

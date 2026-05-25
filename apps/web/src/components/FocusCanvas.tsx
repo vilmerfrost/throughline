@@ -12,6 +12,7 @@ import {
   type NodeMouseHandler,
 } from '@xyflow/react';
 import type { FocusAggregate, FocusModel } from '../lib/focus';
+import { verdictRank } from '../lib/focus';
 import { edgeLabel, toneVar, verdictCopy, type Verdict } from '../lib/trust';
 import { AggregateNode } from './AggregateNode';
 import { ContractSpineNode } from './ContractSpineNode';
@@ -20,13 +21,14 @@ const nodeTypes = { aggregate: AggregateNode, spine: ContractSpineNode };
 
 // Fixed three-lane geometry — the structure is always Writers | Contract |
 // Readers left-to-right, so we place lanes by hand (no Dagre needed). Each lane
-// stacks vertically and is centered against the tallest lane. Generous spacing
-// so nodes and mid-edge labels breathe and don't crowd the contract.
-const LANE_GAP = 140;
+// stacks vertically and is centered against the tallest lane. Spacing is tight
+// enough to fit a typical writers/readers count without fitView shrinking
+// nodes to dots, but loose enough that mid-edge labels don't crowd the spine.
+const LANE_GAP = 120;
 const SPINE_H = 150; // the (taller) contract node — used only for centering
 const LANE_A_X = 0; // writers
-const LANE_B_X = 460; // contract spine — widened from writers
-const LANE_C_X = 900; // readers — widened from the contract
+const LANE_B_X = 400; // contract spine — 180px gap past writer node (220 wide)
+const LANE_C_X = 780; // readers — 100px gap past contract node (280 wide)
 const ANIMATE_MAX_EDGES = 120;
 
 // SVG label styling — a small mid-edge chip in the edge's own color so each
@@ -64,7 +66,7 @@ function TrustTooltip({ verdict, x, y }: Tip) {
   const top = y + 16 + H > window.innerHeight ? y - H - 16 : y + 16;
   return (
     <div
-      className="pointer-events-none fixed z-50 w-72 rounded-md border bg-neutral-900 p-3 text-xs shadow-xl"
+      className="pointer-events-none fixed z-50 w-72 rounded-md border bg-popover p-3 text-xs shadow-elev2"
       style={{ left, top, borderColor: 'var(--color-border-subtle)' }}
     >
       <div className="mb-1.5 flex items-baseline gap-1.5">
@@ -108,6 +110,13 @@ export function FocusCanvas({
     });
 
     const usage = contract.columnUsage ?? [];
+    // Worst verdict among the contract's touches drives the spine's emphasis —
+    // a contract sitting on a mismatch/dark touch reads more prominently than
+    // one whose worst touch is verified.
+    let worst: Verdict | null = null;
+    for (const a of [...writers, ...readers]) {
+      if (worst === null || verdictRank(a.verdict) < verdictRank(worst)) worst = a.verdict;
+    }
     nodes.push({
       id: contract.id,
       type: 'spine',
@@ -119,6 +128,7 @@ export function FocusCanvas({
         serverOnlyCount: usage.filter((u) => u.reach === 'server_only').length,
         writtenNothingReads: model.flags.writtenNothingReads,
         readNothingWrites: model.flags.readNothingWrites,
+        worstVerdict: worst,
       },
     });
 
@@ -199,9 +209,14 @@ export function FocusCanvas({
   );
 
   // Refit whenever the selected contract changes so its flow fills the canvas.
+  // minZoom keeps tall/narrow canvases from shrinking nodes to illegible dots —
+  // the user can pan to see overflow. maxZoom stops a small flow from blowing
+  // up to a single chip filling the canvas.
   const rf = useReactFlow();
   useEffect(() => {
-    const id = requestAnimationFrame(() => rf.fitView({ padding: 0.2, duration: 0 }));
+    const id = requestAnimationFrame(() =>
+      rf.fitView({ padding: 0.2, duration: 0, minZoom: 0.6, maxZoom: 1 }),
+    );
     return () => cancelAnimationFrame(id);
   }, [model.contract.id, rf]);
 
@@ -250,7 +265,7 @@ export function FocusCanvas({
         nodesConnectable={false}
         minZoom={0.1}
         fitView
-        fitViewOptions={{ padding: 0.2, duration: 0 }}
+        fitViewOptions={{ padding: 0.2, duration: 0, minZoom: 0.6, maxZoom: 1 }}
         proOptions={{ hideAttribution: true }}
       >
         <Background color="var(--color-grid)" gap={20} />

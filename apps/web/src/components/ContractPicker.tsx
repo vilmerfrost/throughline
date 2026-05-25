@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { ContractSummary } from '../lib/focus';
-import { worstTrustVar } from '../lib/trust';
+import { verdictWeight, worstTrustVar, type Weight } from '../lib/trust';
 
 interface ContractPickerProps {
   summaries: ContractSummary[]; // already sorted worst-trust-first
@@ -8,9 +8,54 @@ interface ContractPickerProps {
   onSelect: (id: string) => void;
 }
 
+// Visual weight for a row: bigger dot + brighter text for the worst verdicts,
+// quieter rows for verified/untouched. Colors stay the same — only pixel-weight
+// changes — so the user's eye drops onto the problems first.
+function pickerWeightStyles(weight: Weight): {
+  dotPx: number;
+  rowOpacity: number;
+  textTone: string;
+  subTone: string;
+  tint?: string; // optional faint background stripe for critical rows
+} {
+  switch (weight) {
+    case 'critical':
+      return {
+        dotPx: 14,
+        rowOpacity: 1,
+        textTone: 'text-neutral-50',
+        subTone: 'text-neutral-400',
+        tint: 'color-mix(in oklab, var(--color-mismatch) 9%, transparent)',
+      };
+    case 'attention':
+      return {
+        dotPx: 12,
+        rowOpacity: 1,
+        textTone: 'text-neutral-100',
+        subTone: 'text-neutral-500',
+      };
+    case 'okay':
+      return {
+        dotPx: 10,
+        rowOpacity: 0.92,
+        textTone: 'text-neutral-200',
+        subTone: 'text-neutral-500',
+      };
+    case 'quiet':
+      return {
+        dotPx: 8,
+        rowOpacity: 0.7,
+        textTone: 'text-neutral-300',
+        subTone: 'text-neutral-600',
+      };
+  }
+}
+
 // Left rail: every contract, dot + order both driven by the WORST trust among
 // its touches (green only when every touch is verified; gray when untouched).
-// Searchable by table name. Selecting a row drives the focus flow.
+// Searchable by table name. Selecting a row drives the focus flow. Rows with
+// the worst verdicts get more pixel-weight so the problems pop against the
+// gray (presentation only — verdict semantics are unchanged).
 export function ContractPicker({ summaries, selectedId, onSelect }: ContractPickerProps) {
   const [query, setQuery] = useState('');
 
@@ -44,27 +89,37 @@ export function ContractPicker({ summaries, selectedId, onSelect }: ContractPick
           <ul>
             {filtered.map((s) => {
               const active = s.id === selectedId;
+              const w = pickerWeightStyles(verdictWeight(s.verdict));
               return (
                 <li key={s.id}>
                   <button
                     type="button"
                     onClick={() => onSelect(s.id)}
-                    className={`flex w-full items-start gap-2 border-l-2 px-3 py-2 text-left transition ${
+                    className={`flex w-full items-start gap-2.5 border-l-2 px-3 py-2 text-left transition ${
                       active
                         ? 'border-trust-contract bg-neutral-900'
                         : 'border-transparent hover:bg-neutral-900/60'
                     }`}
+                    style={{
+                      opacity: active ? 1 : w.rowOpacity,
+                      backgroundImage:
+                        !active && w.tint ? `linear-gradient(${w.tint}, ${w.tint})` : undefined,
+                    }}
                   >
                     <span
-                      className="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full"
-                      style={{ background: worstTrustVar(s.verdict) }}
+                      className="mt-1 shrink-0 rounded-full"
+                      style={{
+                        background: worstTrustVar(s.verdict),
+                        width: w.dotPx,
+                        height: w.dotPx,
+                      }}
                       title={s.verdict ?? 'untouched'}
                     />
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate font-mono text-sm text-neutral-200">
+                      <span className={`block truncate font-mono text-sm ${w.textTone}`}>
                         {s.label}
                       </span>
-                      <span className="block text-[11px] text-neutral-500">
+                      <span className={`block text-[11px] ${w.subTone}`}>
                         {s.writeCount} writes · {s.readCount} reads
                       </span>
                     </span>

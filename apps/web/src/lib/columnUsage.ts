@@ -35,24 +35,25 @@ export const REACH_META: Record<ColumnReach, ReachMeta> = {
     blurb: 'a read resolves to a property access inside JSX — rendered to a user.',
   },
   server_only: {
-    label: 'used server-side · not shown',
+    label: 'used outside scanned UI',
     color: BLUE,
     highlight: true,
-    blurb: 'read in code but never inside JSX — used, just not rendered.',
+    hedge: 'read by TypeScript server code or SQL views, but not observed inside scanned JSX.',
+    blurb: 'read outside scanned JSX — used, but not proven shown to a user.',
   },
   never_read: {
-    label: 'no reader found',
+    label: 'no scanned reader found',
     color: AMBER,
     highlight: true,
-    hedge: "no TS reader; Python/Rust/views aren't column-scanned, so this may still be read.",
-    blurb: 'no TypeScript reader found — may still be read elsewhere (not “dead”).',
+    hedge: "no scanned reader found; Python/Rust/raw SQL/external agents may still read it. Not a deletion signal.",
+    blurb: 'no scanned reader found — may still be read elsewhere (not “dead”).',
   },
   unknown: {
-    label: 'can’t trace · escapes scope',
+    label: 'reader exists · path opaque',
     color: GRAY,
     highlight: false,
-    hedge: 'the value escapes into untyped scope — type the client to resolve.',
-    blurb: 'a read exists but the value escapes into untyped scope — can’t tell where it goes; type the client to resolve.',
+    hedge: 'a reader exists, but the path is opaque: untyped TypeScript flow or a SQL view whose exact columns could not be attributed.',
+    blurb: 'a reader exists but the path is opaque — can’t tell where the value goes.',
   },
 };
 
@@ -112,8 +113,8 @@ export interface ReachSegment {
 export function reachSummarySegments(s: ReachSummary): ReachSegment[] {
   return [
     { reach: 'ui_shown', count: s.ui_shown, label: 'shown' },
-    { reach: 'server_only', count: s.server_only, label: 'server-only' },
-    { reach: 'never_read', count: s.never_read, label: 'no-reader' },
-    { reach: 'unknown', count: s.unknown, label: 'untraceable' },
+    { reach: 'server_only', count: s.server_only, label: 'outside-UI' },
+    { reach: 'never_read', count: s.never_read, label: 'no scanned reader' },
+    { reach: 'unknown', count: s.unknown, label: 'opaque' },
   ];
 }

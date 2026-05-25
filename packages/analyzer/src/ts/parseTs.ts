@@ -6,6 +6,7 @@ import {
   SyntaxKind,
   type CallExpression,
   type SourceFile,
+  type Type,
 } from 'ts-morph';
 import type {
   EdgeDirection,
@@ -13,9 +14,11 @@ import type {
   GraphNode,
   RootCause,
   SourceRef,
+  TableHelperAlias,
   Trust,
   TrustReason,
 } from '@throughline/core';
+import { classifySourceScope } from '../sourceScope.js';
 import {
   classifyUnresolved,
   resolveClientOrigin,
@@ -23,6 +26,7 @@ import {
   UNRESOLVED_ORIGIN,
   type RootCauseInput,
 } from './rootCause.js';
+import { collectTableHelperAliases, findTableAccesses, type TableAccess } from './tableHelpers.js';
 
 const WRITE_METHODS = new Set(['insert', 'update', 'upsert', 'delete']);
 const ANY_LIKE = /^(any|unknown|never)$/;
@@ -35,6 +39,7 @@ export interface ParseTsResult {
   // RC-a (additive): deterministic root-cause rollup of the dark/asserted TS
   // touches found in this pass, ranked biggest-lever-first.
   rootCauses: RootCause[];
+  helperAliases: TableHelperAlias[];
 }
 
 // Detect where TypeScript reads or writes a database contract, and assign each
@@ -55,13 +60,19 @@ export async function parseTs(
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const usedIds = new Set<string>();
+  const helperAliases = collectTableHelperAliases(
+    project,
+    repoPath,
+    knownTables,
+    isTypedClient,
+    resolveTableName,
+  );
   // RC-a: per-touch facts for dark/asserted touches, rolled up at the end.
   const rootCauseInputs: RootCauseInput[] = [];
 
   // diagnostics (env-gated debug only)
   let filesScanned = 0;
   let filesSkipped = 0;
-  let unresolvedArgs = 0;
   let unmatched = 0;
   const unmatchedTables = new Map<string, number>();
 
@@ -71,40 +82,32 @@ export async function parseTs(
 
     try {
       filesScanned += 1;
-      for (const fromCall of findFromCalls(sf)) {
-        const arg = unwrapParens(fromCall.getArguments()[0]);
-        if (!arg) continue;
-
-        const table = resolveTableName(arg);
-        if (!table.name) {
-          unresolvedArgs += 1; // `.from(variable)`, template w/ substitution, etc.
-          continue;
-        }
-
+      for (const access of findTableAccesses(sf, helperAliases, resolveTableName)) {
         // Don't fabricate a contract for a table we never parsed from SQL.
-        if (!knownTables.has(table.name)) {
+        if (!knownTables.has(access.table)) {
           unmatched += 1;
-          unmatchedTables.set(table.name, (unmatchedTables.get(table.name) ?? 0) + 1);
+          unmatchedTables.set(access.table, (unmatchedTables.get(access.table) ?? 0) + 1);
           continue;
         }
 
-        const touch = describeTouch(fromCall, { name: table.name, bypass: table.bypass }, repoPath, sf);
+        const touch = describeTouch(access, repoPath, sf);
         const id = uniqueId(touch.id, usedIds);
 
         nodes.push({
           id,
           kind: 'touch',
           language: 'typescript',
-          label: `${touch.direction} ${table.name}`,
+          label: `${touch.direction} ${access.table}`,
           trust: touch.trust,
           trustReason: touch.trustReason,
+          sourceScope: touch.sourceScope,
           source: touch.source,
           notes: touch.notes,
         });
         edges.push({
           id: `edge:${id}`,
           source: id,
-          target: `contract:${table.name}`,
+          target: `contract:${access.table}`,
           direction: touch.direction,
         });
 
@@ -112,19 +115,22 @@ export async function parseTs(
         // The origin is resolved deterministically; loose resolution → unresolved,
         // and an unresolved origin is classified by shape (why it's unresolved).
         if (touch.trust === 'dark' || touch.trust === 'asserted') {
-          const origin = resolveClientOrigin(fromCall, repoPath);
+          const origin = access.alias
+            ? { name: access.alias.functionName, source: access.alias.source }
+            : resolveClientOrigin(access.rootCall, repoPath);
           let evidence: SourceRef | undefined;
-          if (origin.name === UNRESOLVED_ORIGIN) {
-            const classified = classifyUnresolved(fromCall, repoPath);
+          if (!access.alias && origin.name === UNRESOLVED_ORIGIN) {
+            const classified = classifyUnresolved(access.rootCall, repoPath);
             origin.shape = classified.shape;
             evidence = classified.evidence;
           }
           rootCauseInputs.push({
             touchId: id,
             reason: touch.trustReason,
-            contract: table.name,
+            contract: access.table,
             origin,
             evidence,
+            sourceScope: touch.sourceScope,
           });
         }
       }
@@ -152,7 +158,6 @@ export async function parseTs(
           byTable: Object.fromEntries(
             Object.entries(byTable).sort((a, b) => b[1] - a[1]),
           ),
-          unresolvedArgs,
           unmatched,
           unmatchedTables: Object.fromEntries(
             [...unmatchedTables.entries()].sort((a, b) => b[1] - a[1]),
@@ -164,7 +169,7 @@ export async function parseTs(
     );
   }
 
-  return { nodes, edges, rootCauses: rollupRootCauses(rootCauseInputs) };
+  return { nodes, edges, rootCauses: rollupRootCauses(rootCauseInputs), helperAliases: [...helperAliases.values()] };
 }
 
 // ---------------------------------------------------------------------------
@@ -193,21 +198,6 @@ export function loadProject(repoPath: string): Project {
 }
 
 // ---------------------------------------------------------------------------
-// Finding `.from(...)` calls
-// ---------------------------------------------------------------------------
-
-function findFromCalls(sf: SourceFile): CallExpression[] {
-  const out: CallExpression[] = [];
-  for (const call of sf.getDescendantsOfKind(SyntaxKind.CallExpression)) {
-    const expr = call.getExpression();
-    if (Node.isPropertyAccessExpression(expr) && expr.getName() === 'from') {
-      out.push(call);
-    }
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
 // Per-touch analysis
 // ---------------------------------------------------------------------------
 
@@ -221,36 +211,37 @@ interface TouchInfo {
   direction: EdgeDirection;
   trust: Trust;
   trustReason: TrustReason;
+  sourceScope: GraphNode['sourceScope'];
   source: SourceRef;
   notes: string;
 }
 
 function describeTouch(
-  fromCall: CallExpression,
-  table: { name: string; bypass: boolean },
+  access: TableAccess,
   repoPath: string,
   sf: SourceFile,
 ): TouchInfo {
-  const tableName = table.name;
-  const chain = analyzeChain(fromCall);
-  const typedClient = isTypedClient(fromCall);
-  const cast = detectCast(fromCall);
+  const tableName = access.table;
+  const chain = analyzeChain(access.rootCall);
+  const typedClient = access.alias ? access.alias.requiresTypedClient : isTypedClient(access.rootCall);
+  const cast = detectCast(access.rootCall);
 
   const { trust, reason: trustReason } = computeTrust({
-    bypass: table.bypass,
+    bypass: access.bypass,
     castAnyUnknown: cast.anyUnknown,
     castConcrete: cast.concrete,
     typedClient,
     specificSelect: chain.specificSelect,
   });
 
-  const source = sourceFrom(fromCall, repoPath, sf);
-  const id = `touch:ts:${source.filePath}:${fromCall.getStartLineNumber()}:${tableName}`;
+  const source = sourceFrom(access.rootCall, repoPath, sf);
+  const sourceScope = classifySourceScope(source.filePath);
+  const id = `touch:ts:${source.filePath}:${access.rootCall.getStartLineNumber()}:${tableName}`;
   const notes = buildNotes({
     direction: chain.direction,
     tableName,
     trust,
-    bypass: table.bypass,
+    bypass: access.bypass,
     castConcrete: cast.concrete,
     castText: cast.castText,
     castAnyUnknown: cast.anyUnknown,
@@ -258,18 +249,19 @@ function describeTouch(
     specificSelect: chain.specificSelect,
   });
 
-  return { id, direction: chain.direction, trust, trustReason, source, notes };
+  return { id, direction: chain.direction, trust, trustReason, sourceScope, source, notes };
 }
 
 // 1. Table name + whether the access bypassed the type system.
-function resolveTableName(arg: Node): TableArg {
-  const lit = literalString(arg);
+function resolveTableName(arg: Node | undefined): TableArg {
+  const lit = literalString(unwrapParens(arg));
   if (lit !== undefined) return { name: lit, bypass: false };
 
-  if (Node.isAsExpression(arg)) {
-    const inner = literalString(unwrapParens(arg.getExpression()));
+  const unwrapped = unwrapParens(arg);
+  if (unwrapped && Node.isAsExpression(unwrapped)) {
+    const inner = literalString(unwrapParens(unwrapped.getExpression()));
     if (inner === undefined) return { bypass: false };
-    const typeText = arg.getTypeNode()?.getText().trim() ?? '';
+    const typeText = unwrapped.getTypeNode()?.getText().trim() ?? '';
     return { name: inner, bypass: ANY_LIKE.test(typeText) };
   }
   return { bypass: false };
@@ -314,18 +306,66 @@ function analyzeChain(fromCall: CallExpression): {
 // 3. Client type — is the receiver a genuinely-typed SupabaseClient<Database>?
 // Conservative: anything we can't confirm as typed is treated as loose, which
 // (per the honesty bias) pushes toward `dark` rather than `verified`.
-function isTypedClient(fromCall: CallExpression): boolean {
+//
+// The receiver's type is resolved STRUCTURALLY (symbol + type arguments), not by
+// its printed text. That matters because a type alias —
+// `type Admin = SupabaseClient<Database>` — prints as `Admin` in getText(), so a
+// naive substring check sees neither "SupabaseClient" nor "Database" and falsely
+// reports `dark`. The class symbol + first type argument survive the alias (and
+// alias chains), giving the SAME guarantee as writing the type inline. This must
+// NOT loosen anything: a bare `SupabaseClient` (DB defaults to `any`), an explicit
+// `<any>`, or an intersection with a bare arm all stay un-typed.
+// Exported so the real-repo verify script can assert this exact function against
+// behavioral ground truth (the `.from()` query-builder result) — not a copy.
+export function isTypedClient(fromCall: CallExpression): boolean {
   const expr = fromCall.getExpression();
   if (!Node.isPropertyAccessExpression(expr)) return false;
   const receiver = expr.getExpression();
   try {
-    const text = receiver.getType().getText(receiver);
-    if (!text.includes('SupabaseClient')) return false;
-    if (/SupabaseClient<\s*any[,>]/.test(text)) return false;
-    return text.includes('Database');
+    return isTypedClientType(receiver.getType(), receiver);
   } catch {
     return false;
   }
+}
+
+// A receiver is typed iff its resolved type is `SupabaseClient<Database>` with a
+// concrete (non-`any`) schema argument. Intersections are typed only if every
+// SupabaseClient-bearing arm is itself typed — a single bare arm (e.g.
+// `SupabaseClient & SupabaseClient<Database>`) reopens untyped access and is the
+// real lie pattern, so it must stay dark/asserted.
+function isTypedClientType(type: Type, node: Node, depth = 0): boolean {
+  if (depth > 12) return false; // pathological alias chain — refuse to guess.
+
+  if (type.isIntersection()) {
+    let hasTyped = false;
+    for (const arm of type.getIntersectionTypes()) {
+      const mentionsClient =
+        arm.getSymbol()?.getName() === 'SupabaseClient' ||
+        arm.getText(node).includes('SupabaseClient');
+      if (!mentionsClient) continue; // unrelated arm (e.g. `& { extra: true }`).
+      if (isTypedClientType(arm, node, depth + 1)) hasTyped = true;
+      else return false; // a SupabaseClient arm that isn't typed reopens access.
+    }
+    return hasTyped;
+  }
+
+  // getSymbol() resolves THROUGH type aliases to the underlying class symbol,
+  // and getTypeArguments() exposes the real generic args — both unaffected by the
+  // alias name that getText() would print. The client is typed iff its first
+  // type argument (the database schema) is a concrete type, NOT `any`. A bare
+  // `SupabaseClient` defaults that argument to `any`, so it (and any alias to it)
+  // is correctly rejected. Verified against the real `.from()` query-builder
+  // result: a concrete first arg is exactly the case where the compiler carries
+  // the schema into the query (typed result); `any` yields an untyped result.
+  if (type.getSymbol()?.getName() === 'SupabaseClient') {
+    const args = type.getTypeArguments();
+    if (args.length === 0) return false; // bare `SupabaseClient` → DB defaults to any.
+    const db = args[0];
+    if (db.isAny()) return false; // bare / explicit `SupabaseClient<any>` → not typed.
+    return !ANY_LIKE.test(db.getText(node).trim()); // unknown/never are not a schema.
+  }
+
+  return false; // symbol didn't resolve to the client class — can't confirm typed.
 }
 
 // 4. Cast detection (heuristic, scoped to the local block). Looks for an

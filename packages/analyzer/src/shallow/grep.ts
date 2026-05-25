@@ -2,6 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import type { EdgeDirection, GraphEdge, GraphNode, Language, SourceRef } from '@throughline/core';
+import { classifySourceScope } from '../sourceScope.js';
 
 // Shallow, line/regex-based detection of Python and Rust touches on the DB
 // contracts. NO AST parsing — we accept approximate detection but never
@@ -109,6 +110,7 @@ export async function grepShallow(
         label: `${c.direction} ${c.table}`,
         trust: 'dark',
         trustReason: lang === 'python' ? 'shallow-grep-python' : 'shallow-grep-rust',
+        sourceScope: classifySourceScope(rel),
         source,
         notes: buildNotes(lang, c.direction, c.table),
       });

@@ -41,6 +41,28 @@ const CLASS_META: Record<
   },
 };
 
+const REASON_GUIDANCE: Record<string, { lead: string; fixLabel: string; warning?: string }> = {
+  'ts-loose-client': {
+    lead: 'The client reaching these calls is loose. Type the construction/signature to let the compiler carry the schema.',
+    fixLabel: 'Client origin',
+  },
+  'ts-cast-concrete': {
+    lead: 'These usage sites cast results to a concrete shape. Typing the factory alone will not clear them; remove or replace the casts.',
+    fixLabel: 'Shared origin, but casts block progress',
+    warning: 'Factory fixes can be correct and still show zero delta until these downstream casts are removed.',
+  },
+  'ts-cast-any': {
+    lead: 'These usage sites erase type evidence with any/unknown/never. Fix the erasure at the usage site.',
+    fixLabel: 'Usage-site erasure',
+    warning: 'A typed factory cannot override an explicit any/unknown cast downstream.',
+  },
+  'ts-bypass-any': {
+    lead: 'These calls bypass the typed client by casting the table name. Fix the table access at the usage site.',
+    fixLabel: 'Usage-site bypass',
+    warning: 'The construction may already be typed; the bypass keeps this touch dark.',
+  },
+};
+
 const REASON_LABEL: Record<string, string> = {
   'ts-loose-client': 'untyped client',
   'ts-cast-concrete': 'unchecked cast',
@@ -67,8 +89,10 @@ export function RootCauseCard({ row, graph, topLever, onShowAffected }: RootCaus
   const [expanded, setExpanded] = useState(false);
   const { rc, klass, actionable, affectedTouches } = row;
   const meta = CLASS_META[klass];
+  const guidance = REASON_GUIDANCE[rc.reason];
   const reason = REASON_LABEL[rc.reason] ?? rc.reason;
   const sigCount = rc.evidence?.length ?? 0;
+  const blocking = row.blockingTouches.slice(0, 5);
 
   const title =
     klass === 'resolved'
@@ -83,7 +107,7 @@ export function RootCauseCard({ row, graph, topLever, onShowAffected }: RootCaus
 
   return (
     <div
-      className={`rounded-lg border bg-neutral-900/60 p-4 transition ${
+      className={`rounded-lg border bg-neutral-900/60 p-4 shadow-elev1 transition ${
         topLever ? 'border-trust-narrowed' : 'border-neutral-800'
       }`}
     >
@@ -121,13 +145,20 @@ export function RootCauseCard({ row, graph, topLever, onShowAffected }: RootCaus
             {rc.affectedContracts.length === 1 ? '' : 's'}.
           </p>
 
-          <p className="mt-1.5 text-xs leading-relaxed text-neutral-400">{meta.lead}</p>
+          <p className="mt-1.5 text-xs leading-relaxed text-neutral-400">
+            {guidance?.lead ?? meta.lead}
+          </p>
+          {guidance?.warning ? (
+            <p className="mt-1.5 rounded border border-trust-narrowed/40 bg-trust-narrowed/10 px-2 py-1.5 text-[11px] leading-relaxed text-trust-narrowed">
+              {guidance.warning}
+            </p>
+          ) : null}
 
           {/* The fix site(s): construction site for resolved, signatures for parameter. */}
           {klass === 'resolved' && rc.origin.source ? (
             <div className="mt-2">
               <div className="mb-1 text-[10px] uppercase tracking-wide text-neutral-500">
-                Construction site
+                {guidance?.fixLabel ?? 'Construction site'}
               </div>
               <SourceLine s={rc.origin.source} />
             </div>
@@ -180,6 +211,24 @@ export function RootCauseCard({ row, graph, topLever, onShowAffected }: RootCaus
                   <span className="ml-2 text-neutral-600">{t.label}</span>
                 </div>
               ))}
+            </div>
+          ) : null}
+
+          {blocking.length > 0 ? (
+            <div className="mt-2">
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-neutral-500">
+                Blocking usage site{row.blockingTouches.length === 1 ? '' : 's'}
+              </div>
+              <div className="space-y-1">
+                {blocking.map((t) =>
+                  t.source ? <SourceLine key={t.id} s={t.source} /> : null,
+                )}
+              </div>
+              {row.blockingTouches.length > blocking.length ? (
+                <div className="mt-1 text-[11px] text-neutral-600">
+                  +{row.blockingTouches.length - blocking.length} more usage sites
+                </div>
+              ) : null}
             </div>
           ) : null}
 
