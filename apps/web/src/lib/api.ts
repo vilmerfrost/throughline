@@ -87,17 +87,57 @@ export function buildAggregateExplainRequest(
 }
 
 // Fetch the graph from the analyzer; fall back to the bundled mock on any error
-// so the web app always renders something.
-export async function fetchGraph(
-  repoPath = '/Users/vilmerfrost/Projects/Batch-Guard.ai-2',
-): Promise<GraphResult> {
+// so the web app always renders something. An undefined `repoPath` lets the
+// analyzer fall back to its hardcoded default (Batch-Guard.ai-2).
+export async function fetchGraph(repoPath?: string): Promise<GraphResult> {
   try {
-    const res = await fetch(`${ANALYZER_URL}/analyze?path=${encodeURIComponent(repoPath)}`);
+    const qs = repoPath ? `?path=${encodeURIComponent(repoPath)}` : '';
+    const res = await fetch(`${ANALYZER_URL}/analyze${qs}`);
     if (!res.ok) throw new Error(`analyzer responded ${res.status}`);
     const graph = (await res.json()) as Graph;
     return { graph, live: true };
   } catch {
     return { graph: sampleGraph, live: false };
+  }
+}
+
+export interface McpConfigInfo {
+  throughlineRoot: string;
+  mcpEntry: string;
+  tsxBinPosix: string;
+  tsxBinWindows: string;
+  // Node's `process.platform` string ('darwin' | 'win32' | 'linux' | ...).
+  // Kept as a free-form string so the web type doesn't need @types/node.
+  platform: string;
+}
+
+// Ask the analyzer for the absolute paths needed to construct an MCP install
+// snippet for the user's machine. Resolved server-side because the browser
+// has no way to know where the user's throughline checkout lives on disk.
+export async function fetchMcpConfigInfo(): Promise<McpConfigInfo> {
+  const res = await fetch(`${ANALYZER_URL}/mcp-config`);
+  if (!res.ok) throw new Error(`mcp-config responded ${res.status}`);
+  return (await res.json()) as McpConfigInfo;
+}
+
+export type PickFolderResult =
+  | { path: string }
+  | { cancelled: true }
+  | { error: string };
+
+// Ask the analyzer to open a native folder picker dialog (osascript on macOS,
+// PowerShell FolderBrowserDialog on Windows, zenity on Linux). The analyzer
+// returns an absolute path the user can hand back to /analyze.
+export async function pickFolder(): Promise<PickFolderResult> {
+  try {
+    const res = await fetch(`${ANALYZER_URL}/pick-folder`, { method: 'POST' });
+    const data = (await res.json().catch(() => ({}))) as PickFolderResult & { error?: string };
+    if (!res.ok) {
+      return { error: data.error ?? `Folder picker failed (${res.status})` };
+    }
+    return data;
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
   }
 }
 

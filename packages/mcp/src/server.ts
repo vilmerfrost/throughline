@@ -2,6 +2,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { GraphCache } from './graphCache.js';
 import {
+  THROUGHLINE_AGENT_INSTRUCTIONS,
+  aboutThroughline,
   getTableFacts,
   getFileFacts,
   getNodeContext,
@@ -24,7 +26,66 @@ function ok(payload: unknown) {
 // returns grounded facts. No tool sets, overrides, or marks a verdict. The only
 // tool that changes facts is reanalyze(), which re-derives them from disk.
 export function createServer(cache: GraphCache): McpServer {
-  const server = new McpServer({ name: 'throughline', version: '0.1.0' });
+  const server = new McpServer(
+    { name: 'throughline', version: '0.1.0' },
+    { instructions: THROUGHLINE_AGENT_INSTRUCTIONS },
+  );
+
+  server.registerResource(
+    'about_throughline',
+    'throughline://about',
+    {
+      title: 'About Throughline',
+      description:
+        'How agents should use Throughline: target selection, trust tiers, schemaMatch, analyzer limits, and read-only guarantees.',
+      mimeType: 'application/json',
+    },
+    async (uri) => ({
+      contents: [
+        {
+          uri: uri.href,
+          text: JSON.stringify(aboutThroughline(), null, 2),
+          mimeType: 'application/json',
+        },
+      ],
+    }),
+  );
+
+  server.registerTool(
+    'about_throughline',
+    {
+      title: 'About Throughline',
+      description:
+        'Read-only onboarding for connected agents: explains the contract-centric model, trust tiers, schemaMatch vs trust, analyzer depth limits, recommended workflow, and grounded/read-only guarantees.',
+      inputSchema: {},
+    },
+    async () => ok(aboutThroughline()),
+  );
+
+  server.registerTool(
+    'get_analysis_target',
+    {
+      title: 'Get current analyzed repo target',
+      description:
+        'Read-only status for the in-memory MCP graph cache: current absolute repo path, how it was resolved (argv/env/default/runtime), analyzed_at, readiness, graph counts, warnings, and workflow hints. Call this first from an agent workspace.',
+      inputSchema: {},
+    },
+    async () => ok(cache.getAnalysisTarget()),
+  );
+
+  server.registerTool(
+    'set_analysis_target',
+    {
+      title: 'Point analysis at a different local repo',
+      description:
+        'Repoints only the MCP cache target. Validates the path exists and is a directory, rebuilds facts from disk with buildGraph, and swaps the cached graph only after success. It never accepts agent-supplied verdicts or graph fragments.',
+      inputSchema: {
+        path: z.string().describe('Absolute or relative path to the local repo/workspace to analyze'),
+        reason: z.string().optional().describe('Optional caller note explaining why the target changed'),
+      },
+    },
+    async ({ path, reason }) => ok(await cache.setAnalysisTarget({ path, reason })),
+  );
 
   server.registerTool(
     'get_table',

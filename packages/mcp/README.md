@@ -9,16 +9,22 @@ is only ever re-earned by changing code on disk and calling `reanalyze`.
 
 | Tool | What it returns | Mutates? |
 | --- | --- | --- |
+| `about_throughline` | Concise onboarding for agents: contract-centric model, trust tiers, `schemaMatch` vs trust, analyzer depth limits, recommended workflow, and read-only guarantee | no |
+| `get_analysis_target` | Current absolute repo path, how it was resolved (`argv`/`env`/`default`/`runtime`), `analyzed_at`, readiness, graph counts, warnings, and hints | no |
+| `set_analysis_target` | Validates a local directory, rebuilds with `buildGraph(path)`, then swaps the in-memory MCP cache only after success; returns previous/current target summaries | the MCP cache target only |
 | `get_table` | Contract facts for a table: columns (type/nullable/default + read reach), writer/reader touches with trust or schemaMatch + analyzer reason, drift, FK neighbors | no |
 | `get_file` | Every data-contract touch in a file, each with its verdict, reason, source snippet, direction, and tables touched | no |
 | `get_node_context` | Full context for one touch by nodeId: its verdict, the contract it touches, sibling touches + FK neighbors | no |
 | `get_root_causes` | The deterministic root-cause rollup, ranked biggest-lever-first | no |
 | `check_write` | **Pure preventive** validation of a *proposed* insert/update vs the schema → `would_align`/`would_mismatch` + `missingRequired`/`unknownKeys`. Names + presence only (never type-checks values). Unknown table → no verdict. | **no — changes nothing, `analyzed_at` untouched** |
-| `reanalyze` | Re-derives the whole graph from disk and replaces the cache; returns fresh + previous `analyzed_at` and per-field deltas | the graph cache (the only tool that moves a verdict) |
+| `reanalyze` | Re-derives the whole graph from disk for the current target and replaces the cache; returns fresh + previous `analyzed_at` and per-field deltas | the graph cache (the only tool that moves a verdict for the same target) |
 
 `check_write` and the Rust write analyzer share **one** comparison
 (`@throughline/analyzer/schema/compareFields` → `compareWriteFields`), so they can
 never disagree about what "aligns with the schema".
+
+The server also advertises MCP initialization instructions and exposes
+`throughline://about` as a JSON resource with the same onboarding facts.
 
 ## Connecting an agent
 
@@ -60,6 +66,25 @@ In `claude_desktop_config.json` (or a project `.mcp.json`):
 
 `pnpm --filter @throughline/mcp start <repoPath>` also works, but only when the
 client's working directory is inside this workspace.
+
+### Runtime target workflow
+
+Connected agents should call `get_analysis_target` first. If the returned
+`repoPath` is not the workspace they are editing, call:
+
+```jsonc
+// tool: set_analysis_target
+{ "path": "/Users/vilmerfrost/Projects/debate-cli", "reason": "agent workspace" }
+```
+
+`set_analysis_target` resolves the path, requires it to exist and be a directory,
+then calls `buildGraph(resolvedPath)`. The cached graph is swapped only after that
+build succeeds. Invalid paths or analyzer failures leave the previous graph and
+target untouched. This keeps Throughline read-only: no tool accepts agent-supplied
+verdicts, graph fragments, or trust changes.
+
+`reanalyze` deliberately keeps its original meaning: refresh the same target from
+disk after edits, without changing `repoPath`.
 
 ## Using check_write
 

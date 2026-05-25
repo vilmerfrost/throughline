@@ -1,5 +1,8 @@
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import express from 'express';
@@ -7,6 +10,8 @@ import type { GraphNode } from '@throughline/core';
 import { explainHandler, type ExplainContext } from './explain.js';
 import { buildGraph } from './buildGraph.js';
 import { buildFixPrompt, polishFixPromptWithLLM } from './fixPrompt.js';
+
+const execFileAsync = promisify(execFile);
 
 // Load env (incl. OPENROUTER_API_KEY) from the repo root and the package dir.
 // The key stays server-side; the frontend only ever talks to /explain.
@@ -76,6 +81,117 @@ app.get('/analyze', async (req, res) => {
   const rawPath = typeof req.query.path === 'string' ? req.query.path : '<mock-repo>';
   const repoPath = resolveRepoPath(rawPath);
   res.json(await buildGraph(repoPath));
+});
+
+// Walk up from this file (packages/analyzer/src/index.ts) until we find the
+// monorepo root (where pnpm-workspace.yaml lives). This makes the MCP config
+// portable: the user's checkout could be anywhere on disk.
+function resolveThroughlineRoot(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  let dir = here;
+  for (let i = 0; i < 8; i += 1) {
+    if (fs.existsSync(path.join(dir, 'pnpm-workspace.yaml'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return path.resolve(here, '../../..');
+}
+
+// GET /mcp-config -> the absolute paths needed to render an MCP config snippet
+// (Cursor / Claude Desktop / Claude Code) in the web UI. The web app then
+// constructs the JSON/CLI strings client-side. We return platform-specific
+// tsx binary names so the same response works on Mac/Linux + Windows.
+app.get('/mcp-config', (_req, res) => {
+  const root = resolveThroughlineRoot();
+  const mcpDir = path.join(root, 'packages', 'mcp');
+  const tsxBinPosix = path.join(mcpDir, 'node_modules', '.bin', 'tsx');
+  const tsxBinWindows = path.join(mcpDir, 'node_modules', '.bin', 'tsx.cmd');
+  const entry = path.join(mcpDir, 'src', 'index.ts');
+  res.json({
+    throughlineRoot: root,
+    mcpEntry: entry,
+    tsxBinPosix,
+    tsxBinWindows,
+    platform: process.platform,
+  });
+});
+
+// POST /pick-folder -> { path: string } | { cancelled: true }
+// Opens a native OS folder picker so the user can choose a codebase without
+// typing an absolute path. Uses built-in OS tools — no native dependency:
+//   - macOS:   osascript "choose folder"
+//   - Windows: PowerShell FolderBrowserDialog
+//   - Linux:   zenity (if installed) — graceful fallback if missing
+app.post('/pick-folder', async (_req, res) => {
+  try {
+    if (process.platform === 'darwin') {
+      const { stdout } = await execFileAsync('osascript', [
+        '-e',
+        'POSIX path of (choose folder with prompt "Choose your codebase folder")',
+      ]);
+      const picked = stdout.trim().replace(/\/$/, '');
+      if (!picked) {
+        res.json({ cancelled: true });
+        return;
+      }
+      res.json({ path: picked });
+      return;
+    }
+
+    if (process.platform === 'win32') {
+      // PowerShell one-liner. Output is the absolute path or empty on cancel.
+      const script = [
+        'Add-Type -AssemblyName System.Windows.Forms',
+        '$f = New-Object System.Windows.Forms.FolderBrowserDialog',
+        '$f.Description = "Choose your codebase folder"',
+        '$null = $f.ShowDialog()',
+        'Write-Output $f.SelectedPath',
+      ].join('; ');
+      const { stdout } = await execFileAsync('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        script,
+      ]);
+      const picked = stdout.trim();
+      if (!picked) {
+        res.json({ cancelled: true });
+        return;
+      }
+      res.json({ path: picked });
+      return;
+    }
+
+    // Linux fallback — try zenity, otherwise tell the caller to type a path.
+    try {
+      const { stdout } = await execFileAsync('zenity', [
+        '--file-selection',
+        '--directory',
+        '--title=Choose your codebase folder',
+      ]);
+      const picked = stdout.trim();
+      if (!picked) {
+        res.json({ cancelled: true });
+        return;
+      }
+      res.json({ path: picked });
+    } catch {
+      res.status(501).json({
+        error:
+          'No native folder picker available on this platform. Type or paste the absolute path instead.',
+      });
+    }
+  } catch (err) {
+    // execFile rejects on non-zero exit (e.g. user cancels osascript). Treat
+    // that as a clean cancel rather than a server error.
+    const message = err instanceof Error ? err.message : String(err);
+    if (/User canceled|cancelled|cancel/i.test(message)) {
+      res.json({ cancelled: true });
+      return;
+    }
+    res.status(500).json({ error: `Folder picker failed: ${message}` });
+  }
 });
 
 app.listen(PORT, () => {

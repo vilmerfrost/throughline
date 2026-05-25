@@ -109,13 +109,17 @@ is verified by a real-repo report script, not just unit tests (see Conventions).
   (`sql/parseSql.ts` `parseSchema`, `RelationshipBand.tsx`, `lib/relationships.ts`)
 - **MCP server** — `@throughline/mcp` calls `buildGraph` in-process and exposes
   the graph's grounded facts to agents via `@modelcontextprotocol/sdk`. Read-only
-  tools: `get_table`, `get_file`, `get_node_context`, `get_root_causes`,
-  `reanalyze` (the only way a verdict moves — re-derives from disk). Plus
-  `check_write` (MCP Stage 2) — a **pure, preventive** validation of a *proposed*
-  insert/update against the schema (`would_align`/`would_mismatch`, names+presence
-  only, never type-checks values, mutates nothing). It reuses the analyzer's ONE
-  shared field comparison (`schema/compareFields.ts` `compareWriteFields`) so the
-  Rust write analyzer and `check_write` can never disagree. (`packages/mcp/`)
+  tools: `about_throughline`, `get_analysis_target`, `get_table`, `get_file`,
+  `get_node_context`, `get_root_causes`, `reanalyze` (refreshes the same target
+  from disk — the only way a verdict moves for that target). `set_analysis_target`
+  is the only target-switching tool: it validates a local directory, rebuilds via
+  `buildGraph(resolvedPath)`, and swaps only the in-memory MCP cache after success
+  (no agent-supplied verdicts or graph fragments). Plus `check_write` (MCP Stage 2)
+  — a **pure, preventive** validation of a *proposed* insert/update against the
+  schema (`would_align`/`would_mismatch`, names+presence only, never type-checks
+  values, mutates nothing). It reuses the analyzer's ONE shared field comparison
+  (`schema/compareFields.ts` `compareWriteFields`) so the Rust write analyzer and
+  `check_write` can never disagree. (`packages/mcp/`)
 
 - **Drift taxonomy (Slice 1)** — every `DriftFinding` now carries `kind`
  (`cross-language-blind-boundary`, `multi-writer-no-shared-type`,
@@ -182,6 +186,7 @@ pnpm build      # runs typecheck, then builds the web app
 pnpm --filter @throughline/analyzer dev    # analyzer alone (tsx watch)
 pnpm --filter @throughline/analyzer test   # analyzer unit tests (node:test + tsx)
 pnpm --filter @throughline/mcp test        # MCP package tests (NOT in root typecheck gate)
+pnpm --filter @throughline/mcp exec tsc -p tsconfig.json --noEmit # MCP typecheck (also NOT in root gate)
 pnpm --filter @throughline/web dev         # web alone — falls back to bundled demo graph
 
 # Real-repo verification reports (honesty checks, NOT unit tests — see Conventions):
@@ -208,10 +213,12 @@ Analyzer (Express, :4000)  — buildGraph(repoPath) [in buildGraph.ts] composes 
   detectDrift       → table-level drift findings
       ↓ Graph JSON
 Web (Vite + React + React Flow, :5173)
-  - React Flow renders nodes colored by trust; click → Inspector + real snippet
-  - three-tab nav: graph / focus (FK band) / Root Causes
-  - "Explain this node" / fix-prompt → analyzer (key stays server-side)
-  - falls back to a bundled offline demo graph if the analyzer is unreachable
+ - React Flow renders nodes colored by trust; click → Inspector + real snippet
+ - three-tab nav: graph / focus (FK band) / Root Causes
+ - header "Folder" control re-points the analyzer (native OS picker via /pick-folder + path fallback, persisted to localStorage)
+ - header "MCP setup" overlay copies an install snippet/prompt grounded in /mcp-config (Mac + Windows)
+ - "Explain this node" / fix-prompt → analyzer (key stays server-side)
+ - falls back to a bundled offline demo graph if the analyzer is unreachable
 ```
 
 ---
@@ -240,13 +247,14 @@ throughline/
 | File | Purpose |
 | --- | --- |
 | `packages/core/src/types.ts` | The entire data model + design intent in doc-comments. Single source of truth for the contract/touch/trust/drift/RootCause/Relationship shapes. **Read before changing the model.** |
-| `packages/analyzer/src/index.ts` | Express server + endpoints (`/health` `/analyze` `/explain` `/fix-prompt`) + hardcoded default-repo resolution |
+| `packages/analyzer/src/index.ts` | Express server + endpoints (`/health` `/analyze` `/explain` `/fix-prompt` `/mcp-config` `/pick-folder`) + hardcoded default-repo resolution. `/mcp-config` returns the absolute paths needed to render an MCP install snippet (Cursor/Claude Desktop/Claude Code) for the user's checkout; `/pick-folder` opens a native OS folder dialog (osascript on macOS, PowerShell `FolderBrowserDialog` on Windows, zenity on Linux) so the web UI can choose a codebase without typing an absolute path. |
 | `packages/analyzer/src/buildGraph.ts` | `buildGraph(repoPath)` — composes all analyzer stages into a `Graph`, including SQL writers (Slice 3), Python payload tracing (Slice 4), and `driftSummary` (Slice 1). Extracted from `index.ts` so the MCP server can call it in-process without booting Express. |
 | `packages/analyzer/src/lifecycle.ts` | `classifyWriterLifecycle(filePath, direction, scope)` — pure path-based classifier emitting `WriterLifecycle` for write touches (`runtime`/`migration`/`seed`/`trigger`). Reads carry no lifecycle. |
 | `packages/analyzer/src/sql/writers.ts` | Slice 3 — scans `supabase/migrations/**/*.sql` and `supabase/seed*.sql` for DML and emits one `lifecycle: 'migration' | 'seed' | 'trigger'` touch per real statement, grounded in its line+snippet. |
 | `packages/analyzer/src/python/parsePython.ts` + `schemaMatch.ts` | Slice 4 — tree-sitter Python parser + deep payload tracing for supabase-py `.insert/.update/.upsert(payload).execute()`. Same honesty bar as Rust Stage 1a: aligned/mismatch only when the payload was REALLY resolved; anything dynamic stays `dark`. |
-| `packages/mcp/README.md` | MCP tool reference + **how to connect an agent** (Claude Code `claude mcp add`, Claude Desktop / `.mcp.json`, env/argv repo selection) |
-| `packages/mcp/src/index.ts` + `server.ts` + `facts.ts` | MCP server entry + tool registration + the functions that turn a `Graph` into agent-readable facts (incl. `checkWrite`) |
+| `packages/mcp/README.md` | MCP tool reference + **how to connect an agent** (Claude Code `claude mcp add`, Claude Desktop / `.mcp.json`, env/argv/runtime repo selection) |
+| `packages/mcp/src/graphCache.ts` | In-memory MCP graph cache: init, same-target `reanalyze`, runtime `setAnalysisTarget` validation/build/swap, and target status/count summaries. This is the only MCP place allowed to mutate the cached target. |
+| `packages/mcp/src/index.ts` + `server.ts` + `facts.ts` | MCP server entry + tool/resource registration + the functions that turn a `Graph` into agent-readable facts (incl. `aboutThroughline`, `checkWrite`) |
 | `packages/analyzer/src/schema/compareFields.ts` | `compareWriteFields` — the ONE pure field-names-vs-schema comparison shared by the Rust write analyzer and MCP `check_write` (insert/update rules + `hasDefault`); exported via `@throughline/analyzer/schema/compareFields` |
 | `packages/analyzer/src/sql/parseSql.ts` | `parseSchema` — SQL contract nodes (via `pgsql-ast-parser`) + FK-A1 declared relationships |
 | `packages/analyzer/src/sourceScope.ts` | File-path source scope classifier for touch facts (`production`/`test`/`migration`/`script`/`generated`/`unknown`) |
@@ -260,8 +268,10 @@ throughline/
 | `packages/analyzer/src/drift/detect.ts` | Table-level drift findings |
 | `packages/analyzer/src/explain.ts` + `fixPrompt.ts` | Grounded LLM commentary + agent-ready fix prompts (OpenRouter, server-side) |
 | `packages/analyzer/scripts/verify-*.mts` | Real-repo honesty-check report scripts (FK / reach / root-cause) |
-| `apps/web/src/App.tsx` | Three-tab shell (graph / focus / Root Causes) + analyzer client + offline fallback |
-| `apps/web/src/lib/api.ts` | Frontend → analyzer client (only path to the server-side key) |
+| `apps/web/src/App.tsx` | Three-tab shell (graph / focus / Root Causes) + analyzer client + offline fallback. Owns the user-selected codebase path (persisted to `localStorage` under `throughline.repoPath`) so the analyzer can be re-pointed without restarting `pnpm dev`. |
+| `apps/web/src/lib/api.ts` | Frontend → analyzer client (only path to the server-side key). Also wraps `/mcp-config` and `/pick-folder`. |
+| `apps/web/src/components/RepoPathPicker.tsx` | Header-level "Folder" control — native OS folder dialog via `/pick-folder` + paste/type fallback for headless environments. |
+| `apps/web/src/components/McpConfigModal.tsx` | "Install MCP" overlay — Mac/Windows tabs, copy-paste JSON config (Cursor/Claude Desktop/.mcp.json), Claude Code CLI snippet, and a one-shot install prompt the user can hand to any agent. |
 | `apps/web/src/components/RootCausesView.tsx` + `RootCauseCard.tsx` + `FixPromptBlock.tsx` | RC-a UI |
 | `apps/web/src/components/RelationshipBand.tsx` + `lib/relationships.ts` | FK-A1 neighborhood band in the focus view |
 | `apps/web/src/mock/` | Bundled offline demo graph (must keep compiling — model changes are additive/optional) |

@@ -29,6 +29,66 @@ export interface Scope {
   depth: 'deep' | 'shallow';
 }
 
+export interface AboutThroughlineFacts {
+  name: 'Throughline';
+  summary: string;
+  trustTiers: Record<Trust, string>;
+  schemaMatch: Record<SchemaMatch, string>;
+  analyzerDepth: Record<AnalyzerDepth, string>;
+  recommendedWorkflow: string[];
+  limits: string[];
+  readOnlyGuarantee: string;
+}
+
+export const THROUGHLINE_AGENT_INSTRUCTIONS =
+  'Throughline is a read-only, contract-centric codebase X-ray. Start with get_analysis_target; ' +
+  'if it is not the workspace you are editing, call set_analysis_target with that repo path. Then use ' +
+  'get_table, get_file, get_node_context, get_root_causes, and check_write for grounded facts. After ' +
+  'edits on disk, call reanalyze to refresh the same target. Trust tiers are sacred: verified means ' +
+  'compiler-inferred TypeScript, narrowed means fields dropped, asserted means an `as` cast, and dark ' +
+  'means any/untyped/shallow evidence. schemaMatch is separate from trust. Python/Rust/raw SQL limits ' +
+  'are analyzer limits unless a deep write payload was resolved. Facts are rebuilt from disk only; ' +
+  'agents cannot supply verdicts or graph fragments.';
+
+export function aboutThroughline(): AboutThroughlineFacts {
+  return {
+    name: 'Throughline',
+    summary:
+      'Throughline is a read-only, contract-centric X-ray for local repos: SQL contracts are the spine, code touches show where data is read or written, and every fact is grounded in source snippets from disk analysis.',
+    trustTiers: {
+      verified: 'Compiler-inferred TypeScript with a typed SupabaseClient<Database>, no cast.',
+      narrowed: 'Typed evidence exists, but a Pick/Omit or partial select dropped fields.',
+      asserted: 'A concrete `as X` cast: the developer said "trust me"; the compiler did not verify it.',
+      dark: 'Type information was erased or the language pass is shallow/untyped; Throughline does not guess.',
+    },
+    schemaMatch: {
+      aligned: 'A resolved write payload has field names aligned with the SQL schema snapshot.',
+      mismatch: 'A resolved write payload is missing required fields or contains unknown keys.',
+      dark: 'The write payload could not be resolved, so no field-level verdict is claimed.',
+    },
+    analyzerDepth: {
+      contract: 'SQL schema parsing defines the contract spine.',
+      deep: 'AST/type-aware analysis resolved the relevant evidence.',
+      shallow: 'Line/grep-level detection only: table and direction may be known, payload shape is not.',
+      analyzer_limit: 'The analyzer recognized the site but bailed out honestly on dynamic or unsupported shape.',
+    },
+    recommendedWorkflow: [
+      'Call get_analysis_target first and compare repoPath to the workspace you are editing.',
+      'If mismatched, call set_analysis_target with the repo path; it rebuilds from disk and swaps the cache only after success.',
+      'Use get_table, get_file, get_node_context, get_root_causes, and check_write to inspect grounded facts.',
+      'After editing files on disk, call reanalyze to refresh the same target before trusting counts or verdicts.',
+    ],
+    limits: [
+      'Throughline is contract-centric, not a semantic data-lineage engine.',
+      'Python and Rust touches are shallow by default unless a specific write payload analyzer resolves the body.',
+      'schemaMatch is a schema snapshot and remains separate from trust; it is not compiler verification.',
+      'All unknowns remain unknown/dark rather than invented facts.',
+    ],
+    readOnlyGuarantee:
+      'MCP tools are read-only over the analyzed repo. set_analysis_target mutates only the in-memory MCP cache target and rebuilds facts that are grounded in disk analysis via buildGraph; no agent-supplied verdicts or graph fragments are accepted.',
+  };
+}
+
 // Deep when ts-morph resolved it (typescript) or a Rust write was deep-parsed
 // against its struct (schemaMatch present). Everything else is shallow grep.
 // Contracts (SQL) are parsed schema -> deep.

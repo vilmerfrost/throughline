@@ -16,8 +16,32 @@ import { FocusLegend } from './components/FocusLegend';
 import { RelationshipBand } from './components/RelationshipBand';
 import { buildRelationshipNeighborhood } from './lib/relationships';
 import { RootCausesView } from './components/RootCausesView';
+import { RepoPathPicker } from './components/RepoPathPicker';
+import { McpConfigModal } from './components/McpConfigModal';
 
 type View = 'focus' | 'roots' | 'map';
+
+// Persist the user's chosen codebase folder across reloads. The web app can
+// be served from disk (`pnpm dev`) on any machine, so we shouldn't bake in
+// any hardcoded path; localStorage is enough to remember the last selection.
+const REPO_PATH_KEY = 'throughline.repoPath';
+function readStoredRepoPath(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(REPO_PATH_KEY);
+  } catch {
+    return null;
+  }
+}
+function writeStoredRepoPath(path: string | null) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (path) window.localStorage.setItem(REPO_PATH_KEY, path);
+    else window.localStorage.removeItem(REPO_PATH_KEY);
+  } catch {
+    /* ignore quota/availability errors */
+  }
+}
 
 export function App() {
   const [graph, setGraph] = useState<Graph | null>(null);
@@ -25,6 +49,11 @@ export function App() {
   const [live, setLive] = useState(false);
   const [view, setView] = useState<View>('focus');
   const [refreshing, setRefreshing] = useState(false);
+  const [mcpModalOpen, setMcpModalOpen] = useState(false);
+  // User-selected codebase path. `undefined` lets the analyzer fall back to
+  // its hardcoded default — the offline mock graph still renders if the
+  // analyzer is unreachable.
+  const [repoPath, setRepoPath] = useState<string | null>(() => readStoredRepoPath());
 
   // Selection is shared across both views. selectedAggKey is focus-only.
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -41,26 +70,47 @@ export function App() {
   const loadGraph = useCallback(async () => {
     setRefreshing(true);
     try {
-      const result = await fetchGraph();
+      const result = await fetchGraph(repoPath ?? undefined);
       setPreviousGraph(graph);
       setGraph(result.graph);
       setLive(result.live);
     } finally {
       setRefreshing(false);
     }
-  }, [graph]);
+  }, [graph, repoPath]);
 
+  // Initial load + reload whenever the user picks a new folder. We deliberately
+  // do NOT depend on `graph` here (loadGraph snapshots `previousGraph` itself);
+  // re-running this effect on every graph change would loop.
   useEffect(() => {
     let cancelled = false;
-    fetchGraph().then((result) => {
-      if (cancelled) return;
-      setGraph(result.graph);
-      setLive(result.live);
-    });
+    setRefreshing(true);
+    fetchGraph(repoPath ?? undefined)
+      .then((result) => {
+        if (cancelled) return;
+        setGraph((prev) => {
+          setPreviousGraph(prev);
+          return result.graph;
+        });
+        setLive(result.live);
+      })
+      .finally(() => {
+        if (!cancelled) setRefreshing(false);
+      });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [repoPath]);
+
+  const applyRepoPath = (next: string) => {
+    if (next === repoPath) return;
+    writeStoredRepoPath(next);
+    // Reset focus/selection — old IDs aren't valid in the new graph.
+    setFocusContractId(null);
+    setSelectedId(null);
+    setSelectedAggKey(null);
+    setRepoPath(next);
+  };
 
   // --- Focus view derivations ---
   const summaries = useMemo(() => (graph ? buildContractSummaries(graph) : []), [graph]);
@@ -219,6 +269,22 @@ export function App() {
             </button>
           </div>
 
+          <RepoPathPicker
+            currentPath={graph?.repoPath ?? repoPath}
+            refreshing={refreshing}
+            onApply={applyRepoPath}
+          />
+
+          <button
+            type="button"
+            onClick={() => setMcpModalOpen(true)}
+            className="flex items-center gap-1.5 rounded-md border border-neutral-700 px-3 py-1 text-xs font-medium text-neutral-300 transition hover:border-neutral-500 hover:text-neutral-100"
+            title="Install the Throughline MCP server in your coding agent"
+          >
+            <span aria-hidden>🔌</span>
+            MCP setup
+          </button>
+
           <button
             type="button"
             onClick={() => void loadGraph()}
@@ -240,6 +306,12 @@ export function App() {
           </span>
         </div>
       </header>
+
+      <McpConfigModal
+        open={mcpModalOpen}
+        onClose={() => setMcpModalOpen(false)}
+        currentRepoPath={graph?.repoPath ?? repoPath ?? null}
+      />
 
       {view === 'focus' ? (
         <main className="flex min-h-0 flex-1">
